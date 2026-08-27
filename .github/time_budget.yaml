@@ -378,7 +378,10 @@ models:
     wh_llmbox_perf: 180
     wh_galaxy_perf: 55
     wh_n150: 108
-    wh_n300: 60
+    # +25 for Qwen3.5-9B e2e tests (wh_n300), on top of main's budget. This branch originally set 75
+    # over a base of 50; main has since raised the base to 60, so the same +25 lands at 85. The
+    # budget must stay >= the sum of the wh_n300 entries or load-test-matrix fails.
+    wh_n300: 85
     bh_p150: 33
     bh_p300: 13
     bh_quietbox_2: 62
@@ -406,7 +409,8 @@ models:
     wh_llmbox_perf: 58
     wh_n150: 75
     wh_n150_civ2: 12
-    wh_n300: 33
+    # +33 for Qwen3.5-9B unit tests (wh_n300). Prior sum was 23/33; 33 would fail load-test-matrix.
+    wh_n300: 56
     bh_p150: 30
     bh_p300: 30
     bh_quietbox_2: 25

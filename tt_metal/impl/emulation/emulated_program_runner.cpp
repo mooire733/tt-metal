@@ -1647,7 +1647,7 @@ static std::map<std::string, std::string> build_kernel_defines(
             if (dfb_cfg.data_format == tt::DataFormat::Invalid) {
                 continue;
             }
-            const ResolvedTileGeometry dfb_geom = resolve_tile_geometry(dfb_cfg.tile, dfb_cfg.unpack_face_geometry);
+            const ResolvedTileGeometry dfb_geom = resolve_tile_geometry(dfb_cfg.tile, std::nullopt);
             tile_sizes[slot] = dfb_geom.tile.get_tile_size(dfb_cfg.data_format);
             cb_formats[slot] = static_cast<uint8_t>(dfb_cfg.data_format);
             tile_r_dim[slot] = dfb_geom.tile.get_height();

@@ -12,6 +12,13 @@
 
 namespace ckernel {
 
+template <SfpuType sfpu_op>
+inline void assert_sanitizer_unary() {
+    if constexpr (sfpu_op != SfpuType::sqrt) {
+        SAN_HOOK(unsupported());
+    }
+}
+
 // Kernel-invariant SFPU init (SFPU config register + invariant ADDR_MOD_7). Retained for the standalone tt-llk
 // SFPU test harness, which bypasses the metal "full init" entry points and runs this itself. The metal compute
 // path no longer hoists this: each per-op init below is self-contained (#50381), running the invariant per-op
@@ -119,7 +126,7 @@ inline void unused_init() { math::reset_counters(p_setrwc::SET_ABD_F); }
 // (asin/acos prime the endpoint-sqrt constants only in fp32 dest); it is ignored by the rest.
 template <SfpuType sfpu_op, bool is_fp32_dest_acc_en>
 inline void llk_math_eltwise_unary_sfpu_init() {
-    SAN_HOOK(unsupported());
+    SAN_HOOK(assert_sanitizer_unary<sfpu_op>());
     // Per-op common SFPU init (config reg + invariant ADDR_MOD_7), formerly hoisted once-per-kernel via
     // llk_math_sfpu_init_once(). Consolidated back per-op (#50381) so each init is fully self-contained and
     // never depends on a separate once-init having run first. The co-located sfpu::<op>_init() below then
@@ -264,7 +271,7 @@ inline void llk_math_eltwise_unary_sfpu_init() {
 // interleaving destructively, which was the #50381 fp32 SDPA accuracy regression.
 template <SfpuType sfpu_op, class F, class... ARGS>
 inline void llk_math_eltwise_unary_sfpu_init(F&& init_func, ARGS&&... args) {
-    SAN_HOOK(unsupported());
+    SAN_HOOK(assert_sanitizer_unary<sfpu_op>());
     _llk_math_eltwise_unary_sfpu_init_<sfpu_op>();
     init_func(std::forward<ARGS>(args)...);
 }

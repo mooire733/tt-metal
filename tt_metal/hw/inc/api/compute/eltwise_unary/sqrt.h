@@ -14,7 +14,10 @@ namespace ckernel {
 /**
  * Please refer to documentation for any_init.
  */
-ALWI void sqrt_tile_init() { MATH(SFPU_UNARY_INIT_FN(sqrt, sfpu::sqrt_init, (APPROX))); }
+ALWI void sqrt_tile_init() {
+    MATH(SAN_HOOK(init<OperationSfpuSqrt>()));
+    MATH(SFPU_UNARY_INIT_FN(sqrt, sfpu::sqrt_init, (APPROX)));
+}
 
 // clang-format off
 /**
@@ -32,13 +35,10 @@ ALWI void sqrt_tile_init() { MATH(SFPU_UNARY_INIT_FN(sqrt, sfpu::sqrt_init, (APP
 // clang-format on
 template <bool FAST_APPROX = false, bool is_fp32_dest_acc_en = DST_ACCUM_MODE>
 ALWI void sqrt_tile(uint32_t idst) {
-    MATH(SFPU_UNARY_CALL(
-        DST_SYNC_MODE,
-        is_fp32_dest_acc_en,
-        calculate_sqrt,
-        (APPROX, 8 /*ITERATIONS*/, is_fp32_dest_acc_en, FAST_APPROX),
-        idst,
-        VectorMode::RC));
+    MATH(SAN_HOOK(execute<OperationSfpuSqrt>(StateDiscard<std::uint32_t>(idst))));
+    MATH(SFPU_BOUNDS_CHECK(DST_SYNC_MODE, is_fp32_dest_acc_en, idst, VectorMode::RC));
+    MATH(_llk_math_eltwise_unary_sfpu_params_(
+        sfpu::calculate_sqrt<APPROX, 8 /*ITERATIONS*/, is_fp32_dest_acc_en, FAST_APPROX>, idst, VectorMode::RC));
 }
 
 }  // namespace ckernel

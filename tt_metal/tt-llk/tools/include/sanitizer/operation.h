@@ -411,6 +411,15 @@ struct OperationFpuEltwiseBinary : Operation<Exu::Fpu, Hoistable::Yes>
         NumFacesCDim>;
 };
 
+// ---------------------------
+// OPERATION - SFPU SQRT
+// ---------------------------
+
+struct OperationSfpuSqrt : Operation<Exu::Sfpu, Hoistable::Yes>
+{
+    using Struct = StateStruct<OperationSfpuSqrt>;
+};
+
 // ----------------------------------------
 // OPERATION - FPU ELTWISE UNARY DATACOPY
 // ----------------------------------------
@@ -535,7 +544,7 @@ using UnpackOperations = OperationList<OperationUnpackUnary, OperationUnpackBina
 
 using FpuOperations = OperationList<OperationFpuMatmul, OperationFpuEltwiseUnaryDatacopy, OperationFpuEltwiseBinary, OperationFpuFastTilizeWh>;
 
-using SfpuOperations = OperationList<>;
+using SfpuOperations = OperationList<OperationSfpuSqrt>;
 
 using PackOperations = OperationList<OperationPack, OperationPackUntilize, OperationPackFastTilizeWh>;
 

@@ -167,7 +167,15 @@ void bind_moe_compute(nb::module_& mod) {
         - Single-device fused mode: pass ``cluster_axis=None`` on a 1x1 mesh. The combine runs
           locally with no fabric, mux cores, links, topology, or cross-device semaphore.
         - Multi-device fused mode: pass ``cluster_axis=0`` or ``cluster_axis=1`` on a multi-device
-          mesh. The combine reduces along that mesh axis using the fabric.
+          mesh. The combine reduces along that mesh axis using the fabric. When that axis has
+          extent 1 (for example axis 0 of a 1x4 expert-parallel mesh) the combine has no
+          neighbours and degenerates to a local write at every mesh coordinate: no fabric, mux
+          cores, links or cross-device semaphore are used (the mesh may be opened without a
+          fabric config), ``topology``, ``num_links``, ``mux_core_range_set`` and
+          ``optional_cross_device_semaphore`` are accepted and unused, every coordinate must
+          receive the same replicated token set and returns the weighted partial of its own
+          experts, and the caller reduces the partials across the other axis. That form does not
+          support shared experts.
 
         With ``compute_only=True``, ``cluster_axis``, ``topology``, ``num_links``,
         ``mux_core_range_set``, ``optional_output_tensor``, and
@@ -184,7 +192,8 @@ void bind_moe_compute(nb::module_& mod) {
           ``Linear`` or ``Ring`` explicitly (BH Loudbox callers must pass ``Linear``).
         - ``num_links`` (optional, default ``None``): Number of fabric links for the
           multi-device fused combine; auto-detected from the mesh and ``cluster_axis`` when
-          ``None``. Must be ``None`` for single-device fused mode and ``compute_only=True``.
+          ``None`` (1 on an axis of extent 1, where no link is opened). Must be ``None`` for
+          single-device fused mode and ``compute_only=True``.
         - ``mux_core_range_set`` (optional, default ``None`` ≡ empty): Cores assigned to
           the fabric mux on the multi-device fused combine path; must be ``None`` for
           single-device fused mode and ``compute_only=True``. Mux cores may be placed anywhere

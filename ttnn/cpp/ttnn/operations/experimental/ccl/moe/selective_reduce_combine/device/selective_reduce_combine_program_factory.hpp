@@ -48,6 +48,9 @@ FusedSourceBufferLayout compute_fused_source_buffer_layout(
     uint32_t token_segment_size_bytes,
     uint32_t num_buffers);
 
+// `local_combine`: the combine axis has no neighbours (a 1x1 mesh or an axis of extent 1), so
+// the data-parallel split is not bounded by the fabric packet size and the fabric context is
+// not consulted. Callers derive it from the mesh shape or from get_neighbors.
 SelectiveReduceCombineWorkerLayout compute_worker_layout(
     const Tensor& input_tensor,
     uint32_t hidden_size,
@@ -63,8 +66,9 @@ struct SelectiveReduceCombineProgramArtifacts {
     tt::tt_metal::CBHandle data_cb_handle{};
     std::vector<tt::tt_metal::CoreCoord> cores;
     // Owned by the artifacts for the standalone UnifiedSelectReduce op. nullopt for the
-    // fused moe_compute FullLocal path (writer compiles out init/final barrier handling),
-    // in which case the kernel runtime args carry a placeholder address of 0.
+    // fused moe_compute FullLocal path; also unused whenever the combine axis has no
+    // neighbours (the writer compiles out init/final barrier handling), in which case the
+    // kernel runtime args carry a placeholder address of 0.
     std::optional<GlobalSemaphore> init_semaphore;
     std::optional<GlobalSemaphore> cross_device_semaphore;
 };
@@ -105,8 +109,10 @@ private:
 // Builder function that creates kernels and returns artifacts.
 // `init_semaphore` / `cross_device_semaphore` are passed as optionals: the builder uses their
 // addresses (0 when nullopt) for writer kernel runtime args, and stores them in the returned
-// artifacts for ownership. nullopt is used by the fused moe_compute FullLocal path, whose
-// writer compiles out all init/final barrier handling.
+// artifacts for ownership. nullopt is used by the fused moe_compute FullLocal path. The
+// writer compiles out all init/final barrier handling, mux connections and fabric sends
+// whenever the combine axis has no neighbours (get_neighbors is empty: a 1x1 mesh or an axis
+// of extent 1), so a caller on such an axis needs no fabric and no cross-device semaphore.
 SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_artifacts(
     tt::tt_metal::Program& program,
     const experimental::prim::SelectiveReduceCombineParams& operation_attributes,
@@ -122,7 +128,7 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
     const std::optional<std::vector<CoreCoord>>& compute_cores_by_ring_id = std::nullopt);
 
 // Runtime argument override function. Semaphore kernel runtime-arg slots are written as
-// raw addresses; pass 0 for the fused moe_compute FullLocal path (unused by the writer).
+// raw addresses; pass 0 when there are none (unused by the writer on an axis with no neighbours).
 void selective_reduce_combine_helper_override_runtime_arguments(
     tt::tt_metal::Program& program,
     tt::tt_metal::KernelHandle reader_kernel_id,

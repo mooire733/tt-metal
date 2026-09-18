@@ -159,7 +159,8 @@ void kernel_main() {
     constexpr bool double_buffer_source = get_named_compile_time_arg_val("double_buffer_source") == 1;
 
 #ifdef LOCAL_COMBINE
-    // Single-device local combine: tokens_per_device = global_num_tokens (1 device).
+    // No neighbours along the combine axis (a 1x1 mesh or an axis of extent 1): this device is
+    // the only dispatch device of its group, so tokens_per_device = global_num_tokens.
     constexpr uint32_t tokens_per_device = global_num_tokens;
     constexpr auto output_ta_args = TensorAccessorArgs<0>();
 #else
@@ -288,7 +289,7 @@ void kernel_main() {
     auto* token_activations_l1_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(token_activations_l1_addr);
 
 #ifdef LOCAL_COMBINE
-    // Local combine: skip the init semaphore entirely. In single-device mode there is no
+    // Local combine: skip the init semaphore entirely. With no neighbours there is no
     // cross-device coordination needed; the compute_sync_semaphore and CB waits handle
     // all necessary synchronization between matmul, reader, and writer.
 #else
@@ -339,7 +340,7 @@ void kernel_main() {
                 src_data_l1_base_addr + *db * source_block_size_bytes + dt * source_token_segment_buffer_size_bytes;
 
 #ifdef LOCAL_COMBINE
-            // Local combine: all writes are local NOC writes (single device).
+            // Local combine: every token's destination is this device, so all writes are local NOC writes.
             noc1_obj.async_write(
                 CoreLocalMem<uint8_t>(src_data_l1_addr),
                 output_addrgen,

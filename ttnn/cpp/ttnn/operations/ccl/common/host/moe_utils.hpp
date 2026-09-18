@@ -10,6 +10,9 @@
 
 namespace ttnn::operations::ccl::common {
 
+// Neighbours of `mesh_coordinate` along `axis` (both axes when nullopt) under `topology`, plus the
+// {East, West, North, South} directions that have one. An axis of extent 1 has no neighbours:
+// the pair is {empty, all false}, a trivial topology the caller runs without fabric traffic.
 std::pair<std::vector<ttnn::MeshCoordinate>, std::array<bool, 4>> get_neighbors(
     const ttnn::distributed::MeshDeviceView& mesh_view,
     const ttnn::distributed::MeshCoordinate& mesh_coordinate,

@@ -26,8 +26,16 @@ void SelectiveReduceCombineDeviceOperation::validate_on_program_cache_miss(
         "dense_token_maps_tensor must be rank 2 ([experts, per-token-stride]); got rank {}",
         tensor_args.dense_token_maps_tensor.logical_shape().rank());
 
-    // Local combine mode: no fabric/links/mux, so skip link-related validation.
-    if (!operation_attributes.local_combine) {
+    // An axis of extent 1 has no neighbours: the combine is a local write with no fabric, links
+    // or mux, so the link-related checks (which consult the fabric context) do not apply.
+    const auto& mesh_shape = input_tensor.device()->shape();
+    TT_FATAL(
+        operation_attributes.axis < mesh_shape.dims(),
+        "cluster_axis {} is out of range for a mesh with {} axes",
+        operation_attributes.axis,
+        mesh_shape.dims());
+    const bool local_combine = mesh_shape[operation_attributes.axis] == 1;
+    if (!local_combine) {
         const auto num_links = operation_attributes.num_links;
         TT_FATAL(num_links > 0, "num_links must be > 0, got {}", num_links);
 
@@ -35,7 +43,8 @@ void SelectiveReduceCombineDeviceOperation::validate_on_program_cache_miss(
             input_tensor,
             operation_attributes.hidden_size,
             operation_attributes.num_token_parallel_cores,
-            operation_attributes.num_data_parallel_cores);
+            operation_attributes.num_data_parallel_cores,
+            local_combine);
         const auto num_worker_cores = worker_layout.num_worker_cores;
         TT_FATAL(
             num_worker_cores % num_links == 0,

@@ -172,6 +172,13 @@ auto launch_mux_workers(
     const uint32_t num_links,
     const uint32_t num_workers,
     Program& program) {
+    // One mux core per link per neighbour. An axis with no neighbours (extent 1) never gets
+    // here: build_selective_reduce_combine_program_artifacts builds the local combine for it,
+    // which has no mux workers and does not touch the fabric context this config needs.
+    TT_FATAL(
+        !neighbors.empty(),
+        "launch_mux_workers needs at least one neighbour along the combine axis; an axis of extent 1 takes the local "
+        "combine path");
     const auto num_header_only_channels = tt::div_up(num_workers, num_links);
     const auto num_full_size_channels = tt::div_up(num_workers, num_links);
 
@@ -366,8 +373,9 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
     using namespace tt::tt_fabric;
     using namespace ttnn::ccl;
 
-    // 0 when the caller has no semaphore (fused moe_compute FullLocal path: the writer
-    // compiles out all init/final barrier handling under LOCAL_COMBINE).
+    // 0 when the caller has no semaphore (fused moe_compute FullLocal path). The writer built
+    // for an axis with no neighbours compiles out all init/final barrier handling under
+    // LOCAL_COMBINE and never reads these.
     const uint32_t init_semaphore_addr = init_semaphore.has_value() ? init_semaphore->address() : 0;
     const uint32_t cross_device_semaphore_addr =
         cross_device_semaphore.has_value() ? cross_device_semaphore->address() : 0;
@@ -393,6 +401,15 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
 
     const auto axis = operation_attributes.axis;
 
+    // The neighbour set along `axis` decides the shape of the combine. Empty (a 1x1 mesh or an
+    // axis of extent 1) means every token's destination is this device: the writer is built
+    // with LOCAL_COMBINE (plain NoC writes, no mux workers, no fabric connection, no
+    // cross-device barrier) and the fabric context is never consulted, so a mesh opened
+    // without a fabric config works. Otherwise the fabric path below is built.
+    const auto [neighbors, directions] =
+        operations::ccl::common::get_neighbors(mesh_view, mesh_coordinate, topology, axis);
+    const bool local_combine = neighbors.empty();
+
     const auto fabric_node_id = mesh_device->get_fabric_node_id(mesh_coordinate);
     const uint32_t src_chip_id = (uint32_t)fabric_node_id.chip_id;
 
@@ -406,9 +423,8 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
     const auto& dense_token_maps_tensor_spec = dense_token_maps_tensor.tensor_spec();
 
     // In local combine mode, there is no fabric packet-size constraint.
-    const auto fabric_max_packet_size_bytes = operation_attributes.local_combine
-                                                  ? std::numeric_limits<uint32_t>::max()
-                                                  : get_tt_fabric_channel_buffer_size_bytes();
+    const auto fabric_max_packet_size_bytes =
+        local_combine ? std::numeric_limits<uint32_t>::max() : get_tt_fabric_channel_buffer_size_bytes();
     const uint32_t max_packet_size_bytes =
         input_dtype == DataType::BFLOAT16 ? std::bit_floor(fabric_max_packet_size_bytes) : fabric_max_packet_size_bytes;
 
@@ -427,11 +443,7 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
     const auto& mux_core_range_set = operation_attributes.mux_core_range_set;
 
     const auto worker_layout = detail::compute_worker_layout(
-        input_tensor,
-        hidden_size,
-        num_token_parallel_cores,
-        num_data_parallel_cores,
-        operation_attributes.local_combine);
+        input_tensor, hidden_size, num_token_parallel_cores, num_data_parallel_cores, local_combine);
     const auto& data_parallel_sizes_bytes = worker_layout.data_parallel_sizes_bytes;
     num_data_parallel_cores = worker_layout.num_data_parallel_cores;
     const auto num_worker_cores = worker_layout.num_worker_cores;
@@ -577,9 +589,9 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
                                     !operation_attributes.optional_cross_device_semaphore.has_value();
 
     // ------------------------------------------------------------------------
-    // Local combine path: single-device, no fabric/mux/CCL.
+    // Local combine path: no neighbours along the axis, so no fabric/mux/CCL.
     // ------------------------------------------------------------------------
-    if (operation_attributes.local_combine) {
+    if (local_combine) {
         std::unordered_map<std::string, uint32_t> writer_named_ct_args = {
             {"dense_token_maps_cb_id", dense_token_maps_cb_id},
             {"data_cb_id", data_cb_id},
@@ -698,8 +710,6 @@ SelectiveReduceCombineProgramArtifacts build_selective_reduce_combine_program_ar
         dest_mesh_id.push_back(*dest_fabric_node_id.mesh_id);
         dest_chip_id.push_back((uint32_t)dest_fabric_node_id.chip_id);
     }
-    const auto [neighbors, directions] =
-        operations::ccl::common::get_neighbors(mesh_view, mesh_coordinate, topology, axis);
 
     // launch mux
     const auto [mux_kernel_id, mux_kernel_config, mux_neigbor_core_maps] = detail::launch_mux_workers(

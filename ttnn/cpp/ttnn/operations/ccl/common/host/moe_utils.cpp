@@ -54,6 +54,11 @@ std::pair<std::vector<ttnn::MeshCoordinate>, std::array<bool, 4>> get_neighbors(
 
     // Helper that appends neighbours for a single axis
     auto process_axis = [&](int32_t axis_val) {
+        if (mesh_view.shape()[axis_val] == 1) {
+            // An axis of extent 1 has no neighbours: with wrap-around the only candidate is the
+            // coordinate itself. Leave the set empty and the directions false.
+            return;
+        }
         int32_t next_neighbor_offset = 1;
         int32_t prev_neighbor_offset = -1;
 
@@ -90,7 +95,10 @@ std::pair<std::vector<ttnn::MeshCoordinate>, std::array<bool, 4>> get_neighbors(
         process_axis(0);  // vertical (column)
     }
 
-    TT_FATAL(!neighbors.empty(), "No neighbors found");
+    // A single axis of extent 1 is a valid trivial topology (empty set); an op that reaches it
+    // runs with no fabric traffic. Anything else with no neighbours is a wiring/shape error.
+    const bool trivial_axis = axis.has_value() && mesh_view.shape()[axis.value()] == 1;
+    TT_FATAL(trivial_axis || !neighbors.empty(), "No neighbors found");
     TT_FATAL(!(axis.has_value() && neighbors.size() > 2), "Along a single axis, there can only be 2 neighbors");
 
     if (!axis.has_value()) {

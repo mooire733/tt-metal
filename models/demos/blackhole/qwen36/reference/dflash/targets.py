@@ -221,10 +221,25 @@ class TtTarget:
     #: drafter the history is reallocated every STEP and the hazard is larger, not smaller.
     allow_trace_past_anchor = False
 
-    def __init__(self, model, tap_layer_ids, page_table, *, checkpoint_path=None, block_size=64, device_taps=False):
+    def __init__(
+        self,
+        model,
+        tap_layer_ids,
+        page_table,
+        *,
+        checkpoint_path=None,
+        block_size=64,
+        device_taps=False,
+        anchor=None,
+    ):
         self.model = model
         self.tap_layer_ids = list(tap_layer_ids)
         self.page_table = page_table
+        # Per-REQUEST anchor. See ANCHOR and anchor_for(): a generation that fits inside one bucket
+        # never crosses, and never crossing is worth far more than the wider bucket costs.
+        if anchor is not None:
+            assert anchor % 64 == 0, f"anchor {anchor} must be a multiple of the 64-row page"
+            self.ANCHOR = int(anchor)
         self.capacity = page_table.shape[1] * block_size
         # device_taps: keep the residual taps on the mesh for a ttnn drafter, instead of reading
         # them back to host. Five fewer PCIe round-trips per step.
@@ -245,6 +260,43 @@ class TtTarget:
     def max_block(self, start: int) -> int:
         """Largest block that fits without crossing the anchor's bucket boundary."""
         return self.ANCHOR - (start % self.ANCHOR)
+
+    @staticmethod
+    def anchor_for(total_tokens, cap=256, floor=128, page=64):
+        """The smallest bucket that holds ``total_tokens`` without a crossing.
+
+        NEVER CROSSING IS THE WIN, and it is much bigger than the wider bucket costs. Measured on
+        tests/reference/test_dflash_anchor_crossing.py gen200 (a 205-token generation), same prompt,
+        same everything but this number:
+
+            anchor   verify median   step     tok/s   crossings
+              128       166 ms       265 ms   10.83       1
+              256       198 ms       283 ms   15.34       0
+              512       254 ms       345 ms   12.60       0
+
+        A crossing costs an eager whole-bucket forward, a ~1.9-3.1 s trace re-capture, and the last
+        ~7 steps of the bucket running eager at ~680 ms instead of ~166 ms traced (max_block lands a
+        block exactly on the boundary, making length == bucket, which skips the maskable path the
+        trace was captured for). Sizing past all of that is worth +42 % here.
+
+        But WIDTH IS NOT FREE, and the cost is not linear: 128 -> 256 buys the crossing away for
+        +32 ms of verify, while 256 -> 512 adds +56 ms more and buys nothing, which is why 512 is
+        SLOWER than 256 despite neither crossing. So take the smallest bucket that fits, not the
+        biggest available -- the opposite of sizing it to max_seq_len.
+
+        ``cap`` is where sizing stops and crossings resume, and 256 is measured, not cautious. On the
+        demo's spec_128_long (128-token prompt + 256 generated = 384 tokens), 384 buys the crossing
+        away and is a WASH against letting it happen:
+
+            anchor 256 (crosses once)   12.88 tok/s
+            anchor 384 (no crossing)    12.91 tok/s
+
+        The extra width costs what the crossing saves, so there is nothing to win by raising the cap
+        at this scale -- and 512 was measured strictly worse. Raise it only against a measurement at
+        the length in question.
+        """
+        want = -(-int(total_tokens) // page) * page
+        return max(int(floor), min(int(cap), want))
 
     def reset(self) -> None:
         # NB: _has_generated deliberately survives reset(). It tracks whether this PROCESS has

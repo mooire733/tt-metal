@@ -74,7 +74,12 @@ from models.demos.blackhole.qwen36.tt.model import Qwen36Model
 
 PAGED_BLOCK_SIZE = 64
 NUM_BLOCKS = 64
-TRACE_REGION = 200_000_000
+# A wider ANCHOR means wider staged buffers and wider trace intermediates, so the region has to
+# grow with it. DFLASH_TRACE_REGION overrides; the default scales off the anchor rather than being
+# a constant that silently fits 128 and nothing else.
+TRACE_REGION = int(os.environ.get("DFLASH_TRACE_REGION", "0")) or max(
+    200_000_000, 200_000_000 * (int(os.environ.get("DFLASH_ANCHOR", "128")) // 128)
+)
 PROMPT = "The capital of France is"
 
 # The prompt is 5 tokens, so `end = 5 + max_new_tokens` and ANCHOR is 128:

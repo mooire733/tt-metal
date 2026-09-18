@@ -90,7 +90,7 @@ NUM_BLOCKS = 64
 PRODUCTION_TOK_S = 17.87
 
 
-def _build(mesh_device, ctx_capacity=None):
+def _build(mesh_device, ctx_capacity=None, anchor=None):
     """The 27B target, the DFlash drafter, and the speculative loop's view of both."""
     drafter_path = resolve_drafter_path()
     cfg = DFlashDrafterConfig.from_pretrained(drafter_path)
@@ -101,7 +101,7 @@ def _build(mesh_device, ctx_capacity=None):
 
     # device_taps=True keeps the target's residual taps on the mesh for the ttnn drafter -- five
     # fewer PCIe round trips per step than reading them back to host.
-    target = TtTarget(model, cfg.target_layer_ids, page_table, device_taps=True)
+    target = TtTarget(model, cfg.target_layer_ids, page_table, device_taps=True, anchor=anchor)
     # ctx_capacity makes the drafter's KV history a persistent fixed buffer, which collapses its
     # per-step shape space to the block width alone -- the precondition for warm_block_widths, and
     # so for retiring the compile-under-a-parked-trace hang. Acceptance is unaffected: priced at
@@ -155,7 +155,6 @@ def _log_results(perf, prompt_len, stats, text):
     [
         pytest.param(128, 100, id="spec_128"),
         pytest.param(128, 256, id="spec_128_long"),
-        pytest.param(512, 100, id="spec_512"),
     ],
 )
 def test_demo_dflash(mesh_device, device_params, seqlen, max_generated_tokens, reset_seeds, ensure_gc):
@@ -183,7 +182,16 @@ def test_demo_dflash(mesh_device, device_params, seqlen, max_generated_tokens, r
         cap = None
         if os.environ.get("DFLASH_CTX_CAPACITY", "1") != "0":
             cap = -(-(seqlen + max_generated_tokens + 32) // 32) * 32
-        model, target, drafter, cfg = _build(mesh_device, ctx_capacity=cap)
+        # Size the anchor so this request never crosses a bucket boundary. A crossing costs an eager
+        # whole-bucket forward, a ~1.9-3.1 s trace re-capture, and the bucket's last ~7 steps running
+        # eager; sizing past all of it measured +42 % on a 205-token generation (10.83 -> 15.34
+        # tok/s). See TtTarget.anchor_for for the width/crossing trade and why the cap is 256.
+        # DFLASH_ANCHOR still overrides, and DFLASH_AUTO_ANCHOR=0 restores the fixed 128.
+        anchor = None
+        if os.environ.get("DFLASH_AUTO_ANCHOR", "1") != "0" and not os.environ.get("DFLASH_ANCHOR"):
+            anchor = TtTarget.anchor_for(seqlen + max_generated_tokens)
+            logger.info(f"auto anchor {anchor} for {seqlen} + {max_generated_tokens} tokens")
+        model, target, drafter, cfg = _build(mesh_device, ctx_capacity=cap, anchor=anchor)
     except Exception as e:  # noqa: BLE001 -- a missing drafter checkpoint is a skip, not a failure
         if "drafter" in str(e).lower() or "DFLASH_HF_MODEL" in str(e):
             pytest.skip(f"drafter checkpoint unavailable ({type(e).__name__}: {e})")

@@ -116,6 +116,54 @@ however broken the trace is, so a run where every draft is rejected still emits 
 reads as fluent English — it just buys nothing. The file now asserts post-anchor acceptance stays
 within 60 % of pre-anchor. Any test whose subject is acceptance must assert on acceptance.
 
+### THE ANCHOR IS A FREE PARAMETER -- size it to the request (2026-09-18)
+
+**Read this before trying to fix the crossing again.** Five routes to removing the re-capture are
+closed (above). The crossing does not need fixing if it does not happen, and which bucket a request
+uses is a choice, not a constraint.
+
+The idea is from the Gemma4 DFlash PR, tenstorrent/tt-metal#56861, which verifies against ONE
+fixed-width persistent buffer masked by a dynamic valid-length TENSOR -- *"context columns at or
+past a `context_valid_len` TENSOR input are excluded, so the mask's SHAPE stays fixed while its
+CONTENT can vary every replay"* -- and therefore never re-anchors at all. We already have that
+mechanism: the staged GDN mask is exactly what lets one capture serve every `valid_len`. We had
+simply sized the window at ANCHOR=128 and bought a boundary every 128 tokens.
+
+Measured on `test_dflash_anchor_crossing.py` gen200 (205-token generation), same prompt, only the
+anchor differing:
+
+| anchor | verify median | step | tok/s | crossings |
+|---|---|---|---|---|
+| 128 | 166 ms | 265 ms | 10.83 | 1 |
+| **256** | **198 ms** | **283 ms** | **15.34** | **0** |
+| 512 | 254 ms | 345 ms | 12.60 | 0 |
+
+**Width is not free and not linear, which is the part that does NOT transfer from Gemma4.**
+128 -> 256 buys the crossing away for +32 ms of verify; 256 -> 512 adds +56 ms more and buys
+nothing, so 512 is SLOWER than 256 although neither crosses. Take the smallest bucket that fits,
+not the largest available -- the opposite of sizing to `max_seq_len`.
+
+`TtTarget.anchor_for(total_tokens)` returns it (floor 128, cap 256) and `TtTarget(anchor=...)` takes
+it per request. The demo sizes itself; `DFLASH_AUTO_ANCHOR=0` or an explicit `DFLASH_ANCHOR` opts
+out. On the demo:
+
+| case | tokens | anchor | result |
+|---|---|---|---|
+| spec_128 | 128 + 100 = 228 | 256, no crossing | **17.23 tok/s, 0.96x production** |
+| spec_128_long | 128 + 256 = 384 | 256, crosses once | 12.88 tok/s, 0.72x |
+
+spec_128 is the case that used to cross on step 0. That 0.96x is the whole of the day's work -- the
+re-capture corruption fix and the staged-input cache are both in it -- not the anchor alone.
+
+**The cap of 256 is measured, not cautious.** On spec_128_long, crossing once and sizing past it
+come out the same: 12.88 tok/s at anchor 256 against 12.91 at anchor 384. The extra width costs
+exactly what the crossing saves, so there is nothing to win by raising the cap at that length.
+Raise it only against a measurement at the length in question.
+
+Note `TRACE_REGION` has to scale with the anchor -- wider buckets mean wider staged buffers and
+wider trace intermediates.
+
+
 ### Throughput, 2026-09-18 — 1.17x -> 1.31x on non-crossing work
 
 Measured on `tests/perf/test_dflash_anchor_size_ab.py` (5-token prompt, 50 tokens, no crossing,

@@ -163,6 +163,43 @@ Raise it only against a measurement at the length in question.
 Note `TRACE_REGION` has to scale with the anchor -- wider buckets mean wider staged buffers and
 wider trace intermediates.
 
+#### The cap is LENGTH-DEPENDENT, not 256 — a cost model that predicts which side you are on
+
+The 256 cap above is right for a 384-token request and wrong for a 261-token one. Measured on
+gen256 (5 + 256 = 261 tokens, 61 steps), where the smallest fitting bucket is 320, not 512:
+
+| anchor | verify median | tok/s | crossings |
+|---|---|---|---|
+| 128 | 166 ms | 11.09 | 2 |
+| 256 | 207 ms | 11.44 | 1 |
+| **320** | **220 ms** | **13.84** | **0** |
+| 512 | 266 ms | 12.05 | 0 |
+
+320 beats the 256 cap by **21 %**, and beats 512 by 15 % because 512 pays for 251 padded rows
+nobody reads. Widening past "it fits" is waste; stopping short of it is worse.
+
+Two numbers make this predictable rather than a sweep. The verify is close to linear in width --
+
+    verify(anchor) ~= 166 + 0.25 * (anchor - 128) ms          ~0.25 ms per padded row
+    a crossing costs ~4.0 s                                    (3653 ms at 128, 4034 ms at 256)
+
+-- so widening by N rows to avoid C crossings pays exactly while
+
+    steps  <  4000 * C / (0.25 * N)
+
+That reconciles the two results above, which look contradictory and are not:
+
+    spec_128_long, 384 tok: +256 rows over 128, ~90 steps -> 5.8 s spent vs 4.0 s saved -> DON'T
+    gen256,        261 tok: +192 rows over 128,  61 steps -> 2.9 s spent vs 4.0 s saved -> DO
+
+It also called 320 before it was run (~13.5 predicted, 13.84 measured). So `anchor_for()` wants the
+smallest fitting bucket subject to that inequality, not a constant cap -- and the cap that is
+correct at 384 tokens costs 21 % at 261.
+
+AND HALVING THE CROSSINGS BARELY HELPS. gen256 at anchor 256 still crosses once and gains 3 % over
+128 (11.44 vs 11.09): the ~41 ms/step it adds across 61 steps very nearly cancels the one 4 s
+crossing it removed. Widening is worth it only when it removes the crossings ENTIRELY.
+
 
 ### Throughput, 2026-09-18 — 1.17x -> 1.31x on non-crossing work
 

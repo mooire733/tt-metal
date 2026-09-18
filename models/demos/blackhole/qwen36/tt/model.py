@@ -2289,6 +2289,8 @@ class Qwen36Model:
         cos_t, sin_t = self._rope_tp_cos_sin_torch(0, bucket)
         blocks_per_bucket = bucket // block_size
         self._vt_bucket = bucket
+        # New buffers: whatever stage_verify_inputs cached last is no longer in them.
+        self._vt_static_key = None
         self._vt_tok = ttnn.from_torch(
             torch.zeros(1, bucket, dtype=torch.int32), dtype=ttnn.uint32, device=self.device, mesh_mapper=rep
         )
@@ -2353,7 +2355,6 @@ class Qwen36Model:
         rep = ttnn.ReplicateTensorToMesh(self.device)
         blocks_per_bucket = bucket // block_size
         blk0 = chunk_start // block_size
-        cos_t, sin_t = self._rope_tp_cos_sin_torch(chunk_start, bucket)
 
         def _h(t, dtype, layout=ttnn.ROW_MAJOR_LAYOUT, mapper=None):
             return ttnn.from_torch(
@@ -2361,13 +2362,32 @@ class Qwen36Model:
             )
 
         ttnn.copy_host_to_device_tensor(_h(token_buf.to(torch.int32), ttnn.uint32, mapper=rep), self._vt_tok)
-        ttnn.copy_host_to_device_tensor(_h(cos_t, ttnn.bfloat16, ttnn.TILE_LAYOUT, rep), self._vt_cos)
-        ttnn.copy_host_to_device_tensor(_h(sin_t, ttnn.bfloat16, ttnn.TILE_LAYOUT, rep), self._vt_sin)
-        ttnn.copy_host_to_device_tensor(_h(page_table, ttnn.int32), self._vt_full_pt)
-        ttnn.copy_host_to_device_tensor(
-            _h(page_table[:, blk0 : blk0 + blocks_per_bucket].contiguous(), ttnn.int32), self._vt_chunk_pt
-        )
-        ttnn.copy_host_to_device_tensor(_h(torch.tensor([chunk_start], dtype=torch.int32), ttnn.int32), self._vt_csi)
+        # FIVE OF THESE EIGHT UPLOADS ARE INVARIANT WITHIN A BUCKET. TtTarget._run always runs
+        # [anchor, end), so chunk_start does not move until the anchor does -- and cos, sin, both
+        # page tables and the chunk-start index are functions of chunk_start and the page table
+        # alone. Re-uploading them every step was pure waste: only the tokens and the two GDN masks
+        # (below) actually change from one verify to the next.
+        #
+        # The buffers are persistent and their addresses are baked into the trace, so skipping a
+        # rewrite leaves exactly the bytes the previous step wrote -- which are the bytes this step
+        # wants. Keyed on the page table's CONTENT, not its identity: callers do hand over different
+        # tables (TtTarget.capture_page_table builds a fresh one per capture), and a freed tensor's
+        # id can be reused, which would silently serve a stale mapping. The table is [1, n_blocks]
+        # int32 -- a few hundred bytes -- so hashing it every step is far cheaper than the five
+        # uploads it guards.
+        _key = (int(chunk_start), int(bucket), page_table.cpu().numpy().tobytes())
+        if getattr(self, "_vt_static_key", None) != _key:
+            cos_t, sin_t = self._rope_tp_cos_sin_torch(chunk_start, bucket)
+            ttnn.copy_host_to_device_tensor(_h(cos_t, ttnn.bfloat16, ttnn.TILE_LAYOUT, rep), self._vt_cos)
+            ttnn.copy_host_to_device_tensor(_h(sin_t, ttnn.bfloat16, ttnn.TILE_LAYOUT, rep), self._vt_sin)
+            ttnn.copy_host_to_device_tensor(_h(page_table, ttnn.int32), self._vt_full_pt)
+            ttnn.copy_host_to_device_tensor(
+                _h(page_table[:, blk0 : blk0 + blocks_per_bucket].contiguous(), ttnn.int32), self._vt_chunk_pt
+            )
+            ttnn.copy_host_to_device_tensor(
+                _h(torch.tensor([chunk_start], dtype=torch.int32), ttnn.int32), self._vt_csi
+            )
+            self._vt_static_key = _key
         # The GDN mask: 1.0 for real tokens, 0.0 for the bucket's padding. This is the whole reason
         # a masked forward was thought un-traceable -- the multiplies it feeds are fixed-shape, so
         # staging the CONTENTS here is enough. See gdn/fused_chunk.py's valid_mask.
@@ -2378,7 +2398,13 @@ class Qwen36Model:
         return self._verify_staged()
 
     def capture_verify_trace(
-        self, page_table, bucket, warm_tokens=None, valid_len=None, narrow_head=False, capture_chunk_start=0
+        self,
+        page_table,
+        bucket,
+        warm_tokens=None,
+        valid_len=None,
+        narrow_head=False,
+        capture_chunk_start=0,
     ):
         """Capture ONE masked verify forward + norm + LM head, for speculative block verification.
 
@@ -2490,6 +2516,7 @@ class Qwen36Model:
         # refreshes the same buffers -- but take_taps() POPS the dict, which would leave the second
         # replay with nothing to hand back. Keep the handles and restore them per replay.
         self._vt_taps = dict(self._taps) if self._taps else None
+
         return tid
 
     @staticmethod

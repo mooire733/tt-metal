@@ -193,7 +193,19 @@ class TtTarget:
     """
 
     #: Both the smallest masked bucket and the required chunk_start alignment.
-    ANCHOR = 128
+    #: Masked-bucket size AND the required chunk_start alignment. DFLASH_ANCHOR overrides it.
+    #:
+    #: THIS IS THE DOMINANT DEVICE COST. A traced verify replays the WHOLE bucket whatever the real
+    #: span is -- a trace bakes shapes -- so a 16-token block early in a bucket still costs a
+    #: 128-row forward. tests/perf/test_traced_verify_host_breakdown.py measures that replay at
+    #: 107.1 ms of a ~204 ms step, at 99 % device utilization, so it cannot be dispatched away;
+    #: only fewer rows can move it. Halving the bucket roughly halves it.
+    #:
+    #: What it costs in return: max_block() truncates a block that would cross the boundary, so a
+    #: smaller bucket truncates more often (with block 16 and bucket 64, a quarter of start
+    #: positions), and crossings come twice as often. Both are why this is a measured A/B and not a
+    #: constant someone should just lower.
+    ANCHOR = int(os.environ.get("DFLASH_ANCHOR", "128"))
     #: Every forward recomputes from the anchor, so a rejected block needs no replay.
     replays_after_rollback = False
 
@@ -469,6 +481,17 @@ class TtTarget:
         assert lo % self.ANCHOR == 0, f"chunk_start {lo} is not {self.ANCHOR}-aligned"
         length = hi - lo
         assert 1 <= length <= self.ANCHOR, f"span [{lo}, {hi}) does not fit one {self.ANCHOR} bucket"
+        # DFLASH_TIME_STEPS=1: what does the per-step GDN restore actually cost HERE? The published
+        # 17.7 ms (tests/perf/test_traced_verify_host_breakdown.py) was taken at a different bucket,
+        # head and capacity, and two projections built on that profile were off by ~10x. Measure
+        # before deciding whether moving these 144 copies inside the capture is worth its risk.
+        # MEASURED 16.4 ms/step, and it does NOT move into the capture. Doing so is trace-legal on
+        # paper (144 ttnn.copy between persistent buffers) and was tried: throughput per generation
+        # came out 3.17 / 23.84 / 4.11 tok/s with acceptance 1.000 and token-soup output. The
+        # alternation is the diagnosis -- reset() retakes the anchor snapshot between generations,
+        # so the baked addresses go stale and the trace restores from freed memory. Making reset()
+        # reuse those buffers is the obvious repair and is independently known to SIGBUS the
+        # drafter (see the DFLASH_FRESH_ANCHOR notes below). So this stays on the host.
         self.model.restore_gdn_state(self._anchor_gdn)
         # length == ANCHOR is a WHOLE bucket (prompt prefill), and gdn/tp.py::_normalize_valid_len
         # turns valid_len >= T into None -- masking skipped, different programs than the capture.
@@ -542,6 +565,19 @@ class TtTarget:
         That is why every isolated reproduction passed: one eager pass and one replay leaves a
         different allocator history than twenty-odd replays followed by an eager whole bucket.
 
+        FOUR ROUTES TO NOT NEEDING THIS, ALL REFUTED, so that nobody spends the day again:
+
+          * two traced 64-row halves in place of the whole bucket -- argmax agreement 0.7500
+            (tests/unit/test_split_bucket_crossing.py, kept as an xfail record);
+          * pre-allocating the trace's OUTPUT outside the capture window -- see below;
+          * a second trace for the whole-bucket shape, so the crossing replays instead of running
+            eager -- acceptance after the anchor 1.013, and with prefill_block_all_logits'
+            chunk_start == 0 branch mirrored, 1.203. Isolating it (crossing traced, verify EAGER
+            past the anchor) still gave 1.055, which rules OUT the second capture corrupting the
+            first and puts the fault in the replay itself;
+          * moving the 16.4 ms restore into the capture -- 3.17 / 23.84 / 4.11 tok/s by generation,
+            acceptance 1.000. See the restore in _run.
+
         IT IS THE WHOLE WORKING SET, NOT THE OUTPUT. Pre-allocating the trace's output buffer
         outside the capture window (ttnn.allocate_tensor_on_device + a ttnn.copy at the end of the
         captured body) changed the post-anchor acceptance by NOTHING -- 1.116, digit for digit with
@@ -576,7 +612,9 @@ class TtTarget:
         _t0 = _time.perf_counter()
         self.model.release_verify_trace()
         self.model.capture_verify_trace(
-            self._capture_page_table(), self.ANCHOR, narrow_head=getattr(self, "_narrow_head", False)
+            self._capture_page_table(),
+            self.ANCHOR,
+            narrow_head=getattr(self, "_narrow_head", False),
         )
         self._recaptures = getattr(self, "_recaptures", 0) + 1
         logger.info(
@@ -733,7 +771,12 @@ class TtTarget:
         # narrow_head: capture stops at the norm and the LM head runs per replay over a 32- or
         # 64-row tile-aligned window instead of all ANCHOR rows. OFF by default -- it is a device
         # change measured nowhere yet, and the whole-bucket head is the shipped, trusted path.
-        self.model.capture_verify_trace(self.page_table, self.ANCHOR, warm_tokens=warm_tokens, narrow_head=narrow_head)
+        self.model.capture_verify_trace(
+            self.page_table,
+            self.ANCHOR,
+            warm_tokens=warm_tokens,
+            narrow_head=narrow_head,
+        )
         self._traced_verify = True
         self._narrow_head = narrow_head
 

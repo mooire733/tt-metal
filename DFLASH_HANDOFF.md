@@ -7,6 +7,176 @@ don't repeat work that has already been done and measured.
 
 ---
 
+## 0. Update 2026-09-18 — the anchor crossing is FIXED, and why recapture cannot be removed cheaply
+
+### The crossing defect, root cause and fix
+
+Crossing an anchor runs the completed bucket as one `length == ANCHOR` forward, which `_run` sends
+down the EAGER path. That eager forward allocates while the verify trace is parked and corrupts it:
+every traced verify afterwards returns all-zero logits, acceptance collapses to ~1.1, and the output
+fills with multilingual soup. `DFLASH_RECAPTURE_ON_ANCHOR=1` re-takes the trace at each anchor and
+repairs it — but the first version of that repair was itself broken, in two ways:
+
+1. **It zeroed the KV history.** `capture_verify_trace` is NOT a dry run: it executes three real
+   forwards (a warm-up, the narrow-head probe, and the captured body), each over `bucket` ZERO
+   tokens at `chunk_start=0`, and each ending in a `paged_fill_cache`. Handed the live page table
+   those writes land on the pages of the bucket that just completed — the exact span every later
+   step attends back over.
+2. **It polluted the GDN snapshot.** `_recapture_after_anchor()` ran BEFORE `save_gdn_state`, so
+   `_anchor_gdn` captured all 48 recurrent states *after* the capture's forwards had advanced them.
+
+Both are fixed in `TtTarget`: the snapshot is taken first, and the capture runs against spare pages
+via `TtTarget.capture_page_table()` (the bucket's entries remapped onto the table's last pages;
+replays re-stage the real table, so nothing is baked; degrades to the live table rather than alias a
+page in use). Guarded hardware-free by `tests/unit/test_capture_page_table.py`.
+
+Measured on `test_dflash_anchor_crossing.py` gen200 (5-token prompt, one crossing):
+
+| arm | after-anchor acceptance | tok/s | non-ascii |
+|---|---|---|---|
+| eager fallback past the anchor | 4.529 | 4.79 | 0 |
+| traced past anchor, no recapture | 1.116 | 5.24 | 20 |
+| traced + BROKEN recapture | 3.348 | 7.42 / 6.94 | 0 |
+| **traced + FIXED recapture** | **4.529** | **8.40 / 8.78 / 8.20** | 0 |
+
+4.529 is eager's number exactly, and the generated text is byte-identical. Acceptance is
+greedy-deterministic so it needs no repeats; throughput mean is 8.46 tok/s, ±3.4 %. A recapture
+costs a measured **1.86–2.29 s**, ~10 % of a 200-token run and a tax every 128 tokens.
+
+### WHY `_dual_check` SAID "CLEAN" WHILE THIS WAS HAPPENING — read this before trusting a self-check
+
+`DFLASH_VERIFY_DUAL=1` compares the traced verify against an eager recomputation of the same step,
+and it reported `argmax_agree=1.0000` with `tap_cos_worst=0.999987` throughout — while acceptance
+was visibly degraded. Both sides recompute from the SAME zeroed pages and the SAME polluted
+snapshot, so they agree with each other while both are wrong. **Agreement is not correctness when
+the two sides share their corrupted input.** The "compare a component against ITSELF" method that
+solved the parity bug has exactly this blind spot, and it cost a full cycle here. It is the second
+time this same capture-overwrites-KV mechanism has produced a false conclusion (the first is the
+retracted fixture artifact in §0/2026-09-16).
+
+### CAN THE RECAPTURE BE REMOVED? Two cheap routes tested, BOTH REFUTED. Do not redo these.
+
+The recapture exists only because DFlash breaks the rule stated in `tt_transformers/tt/generator.py`:
+*"Allocation-free outside the capture window by construction — everything it binds to was allocated
+before any trace existed."* The crossing is the one place it allocates under a parked trace.
+
+* **Split the crossing into two traced 64-row halves** (each `< ANCHOR`, so the existing trace
+  serves it; `chunk_start` is staged and `paged_fill_cache` needs only 64-row alignment).
+  **REFUTED:** argmax agreement **0.75**, taps decaying monotonically with depth (L0 0.9998 →
+  L30 0.9836). The GDN scan does not decompose across the split. Recorded in
+  `tests/unit/test_split_bucket_crossing.py`. Caveat: each half runs in an ANCHOR-sized bucket and
+  so writes 64 rows of padding into KV, which is a confound — but removing it needs a bucket-64
+  trace, which is a second trace, i.e. Option A below anyway.
+* **Pre-allocate the trace's OUTPUT outside the capture** (`ttnn.allocate_tensor_on_device` before
+  `begin_trace_capture`, body ending in a warmed `ttnn.assign` into it). **REFUTED:** after-anchor
+  acceptance **1.116**, bit-identical to no protection. The non-crossing arm passed at 6.300, which
+  proves the buffer really was being written — so the output simply is not the victim. What the
+  eager forward destroys is the trace's INTERNAL working memory (the intermediates the replay
+  computes through, plus `_vt_taps`), which cannot be pre-allocated without restructuring the
+  captured body op by op. Reverted; no variant of this will work.
+
+  Two ttnn landmines found doing it, both worth knowing: `ttnn.copy` is data-movement and dies
+  inside a capture with `TT_FATAL !is_capturing_trace` (use `ttnn.assign`, which is eltwise and
+  captures); and the copy op is ITSELF a program, so it must be warmed before the capture or you get
+  `Cannot load new binaries during trace capture`.
+
+* **Option A: a second, WHOLE-BUCKET trace, captured up front and replayed at the crossing** so no
+  eager forward ever runs while a trace is live. BUILT 2026-09-18 and **REFUTED**. Implementation:
+  `capture_verify_trace(capture_crossing=True)` captured a second trace whose body calls the masked
+  forward with `valid_len == bucket` -- on Wormhole `_normalize_valid_len` turns that into `None`,
+  giving the unmasked whole-bucket program set off the SAME staged buffers, so no second staging is
+  needed. Measured on gen200:
+
+  | arm | after-anchor acceptance |
+  |---|---|
+  | crossing traced + verify traced past anchor | 1.013 |
+  | + `prefill_block_all_logits`' `chunk_start == 0` branch mirrored in the replay | 1.203 |
+  | crossing traced, verify EAGER past the anchor (isolation) | 1.055 |
+
+  The isolation arm is the important one: with the verify trace never replayed after the crossing,
+  acceptance still collapses. So the second capture does NOT corrupt the first -- **the crossing
+  replay itself is wrong**, and mirroring the eager path's per-call setup (GDN reset and
+  `_build_request_rope` at `chunk_start == 0`, which the FIRST crossing hits because the loop starts
+  with `_anchor == 0`) was necessary but nowhere near sufficient. The machinery has been removed
+  rather than left dead; this table is the record.
+
+* **Move the 16.4 ms `restore_gdn_state` into the capture** -- 144 `ttnn.copy` between persistent,
+  fixed-address buffers, which is trace-legal on paper. **REFUTED:** 3.17 / 23.84 / 4.11 tok/s by
+  generation, acceptance 1.000, token soup. The *alternation* is the diagnosis: `reset()` retakes
+  the anchor snapshot between generations, so the baked addresses go stale and the trace restores
+  from freed memory. Making `reset()` reuse those buffers is the obvious repair and is
+  independently known to SIGBUS the drafter.
+
+So the recapture stays. Four routes are now closed; the next one is not a tweak.
+
+### A test hole worth remembering
+
+`test_dflash_anchor_crossing.py` **passed** at acceptance 1.116. Greedy verification pins the tokens
+however broken the trace is, so a run where every draft is rejected still emits `" Paris."` and still
+reads as fluent English — it just buys nothing. The file now asserts post-anchor acceptance stays
+within 60 % of pre-anchor. Any test whose subject is acceptance must assert on acceptance.
+
+### Throughput, 2026-09-18 — 1.17x -> 1.31x on non-crossing work
+
+Measured on `tests/perf/test_dflash_anchor_size_ab.py` (5-token prompt, 50 tokens, no crossing,
+3 repeats, narrow head), against 17.87 tok/s production:
+
+| config | tok/s | step | vs production |
+|---|---|---|---|
+| baseline | 20.88 | 299.3 ms | 1.17x |
+| + drafter trace at C=128 | 21.38 | 292.3 ms | 1.20x |
+| **+ staged-input cache** | **23.38-23.59** | **265-267 ms** | **1.31-1.32x** |
+
+**The staged-input cache is the win (-26 ms).** `stage_verify_inputs` re-uploaded EIGHT buffers per
+step, but `_run` always runs `[anchor, end)`, so `chunk_start` does not move until the anchor does
+-- cos, sin, both page tables and the chunk-start index are invariant within a bucket. Only the
+tokens and the two GDN masks actually change. Keyed on page-table CONTENT, not identity: callers do
+hand over different tables and a freed tensor's id can be reused.
+
+**The drafter trace is now a small win, not the recorded 0.85x regression.** That verdict was taken
+at `ctx_capacity=512` where `stage_step`'s `[1,1,q_len,C+32]` masks dominate; at C=128 it is +2.3 %.
+`enable_traced_draft` also had a latent bug making it uncallable in the only legal order (it warms a
+synthetic step at `start == new_ctx == ctx_pad`, which needs an empty history, but tracing must
+follow an eager generation) -- it now resets first.
+
+**Refuted throughput levers, measured, do not redo:**
+
+* **Halve the bucket (128 -> 64).** -5 ms of a 299 ms step, not the ~60 predicted. At 128 rows the
+  forward is 4 tiles and is latency/dispatch-bound, NOT FLOP-bound in rows. This is the measurement
+  that reframes everything below.
+* **Widen the block (16 -> 24 / 32).** Acceptance FELL 6.125 -> 5.444 and throughput with it
+  (1.07x, 1.04x). The drafter is trained on exactly 15 masked slots; extra slots do not merely go
+  unaccepted, they degrade the whole block, which the drafter attends over.
+
+### What is left, and why it is not tuning
+
+In-loop phase timing (`DFLASH_TIME_STEPS=1`, added to `generate.py`): **verify 166 ms (69 %),
+propose 71 ms (30 %)**, accept 2.8, taps 1.0, logits-to-host 0.0. Combined with the bucket result,
+the verify's cost is per-layer FIXED overhead across 64 layers, not work proportional to the span --
+so it does not shrink by verifying fewer rows, and ~107 ms of it is device-bound replay at 99 %
+utilization.
+
+The two candidates big enough to reach +40 % (25.0 tok/s):
+
+* **Re-take the device-argmax verdict.** It is recorded as catastrophic (22.19 -> 4.48 tok/s) and
+  warned against -- but that was measured on the WIDE head's `[1,1,128,vocab]` 63 MB tensor. With
+  the narrow head the source is `[1,1,32,vocab]`, 4x smaller, and the recorded reasoning ("same op,
+  same width, opposite verdict, decided by the tensor it reads") is itself the argument for
+  re-measuring at the new size. Worth ~27 ms.
+* **Stop recomputing the span from the anchor.** Checkpoint GDN recurrent state at each candidate
+  accept position so rollback is a state select rather than a replay -- the fix `generate.py`'s
+  module docstring already names. This is the one that changes the ceiling rather than the constant.
+
+### Where throughput actually stands
+
+Non-crossing workloads are at production parity (gen64: **18.13 tok/s** vs 17.87 production, 1.01x).
+Crossing workloads are at **~0.47x** (8.46 tok/s). Removing the recapture recovers ~10 % of that gap.
+The rest is structural: every speculative step recomputes the whole span from the anchor — up to 128
+rows through 64 layers — to verify a 16-token block. That recompute, not the recapture, is the next
+real target.
+
+---
+
 ## 0. Update 2026-09-15 (second machine) — both open problems now have a mechanism
 
 The environment reproduces: `test_dflash_traced_throughput.py` gives acceptance **7.000** and

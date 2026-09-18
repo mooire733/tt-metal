@@ -51,6 +51,7 @@ candidate accept position inside the block, making rollback a state select inste
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -255,6 +256,43 @@ def _dump_step(start, block_ids, posterior, accepted):
     print(f">>> DUMP match  ={[int(d == a) for d, a in zip(draft, arg)]}\n")
 
 
+class _StepTimer:
+    """Per-phase wall time for the speculative loop. DFLASH_TIME_STEPS=1.
+
+    The published breakdown (tests/perf/test_traced_verify_host_breakdown.py) was taken at bucket
+    128, WIDE head and ctx_capacity 512. The shipping config is none of those, and two projections
+    built on it were wrong by an order of magnitude -- halving the bucket was predicted at -60 ms
+    and measured -5, tracing the drafter at -60 and measured -7. So measure the loop that is
+    actually running, in the loop, rather than inheriting a breakdown from a different one.
+    """
+
+    def __init__(self):
+        self.on = os.environ.get("DFLASH_TIME_STEPS") == "1"
+        self.acc, self.n = {}, 0
+
+    def __call__(self, phase):
+        timer = self
+
+        class _Ctx:
+            def __enter__(self):
+                self.t0 = time.perf_counter()
+
+            def __exit__(self, *a):
+                if timer.on:
+                    timer.acc[phase] = timer.acc.get(phase, 0.0) + (time.perf_counter() - self.t0) * 1000
+
+        return _Ctx()
+
+    def report(self, steps):
+        if not self.on or not steps:
+            return
+        total = sum(self.acc.values())
+        print(f"\n>>> STEP BREAKDOWN over {steps} steps ({total / steps:.1f} ms/step measured here)")
+        for phase, ms in sorted(self.acc.items(), key=lambda kv: -kv[1]):
+            print(f">>>   {phase:<12} {ms / steps:7.1f} ms/step  ({100 * ms / total:5.1f} %)")
+        print()
+
+
 @torch.inference_mode()
 def dflash_generate(
     drafter,
@@ -316,6 +354,7 @@ def dflash_generate(
     acceptance_lengths: list[int] = []
     num_rollbacks = 0
     start = num_input_tokens
+    _t = _StepTimer()
 
     # ---- speculative decode ----
     while start + 1 < max_length and not stopped:
@@ -335,21 +374,24 @@ def dflash_generate(
             # rows and the drafter's context falls one token behind the target's -- which its own
             # assert catches on the following step ("context is at 126 + 1 new rows but the block
             # starts at 128").
-            drafted, draft_probs = drafter.propose(
-                _taps_join(target, pending_taps),
-                block_ids,
-                start,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-            )
+            with _t("propose"):
+                drafted, draft_probs = drafter.propose(
+                    _taps_join(target, pending_taps),
+                    block_ids,
+                    start,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                )
             pending_taps = []
             block_ids[:, 1:] = drafted.cpu()
 
         # ---- verify: one target forward over the whole block ----
         snap = target.snapshot() if verify_size > 1 else None
-        logits, taps = target.forward(block_ids, start)
-        logits = logits.cpu()
+        with _t("verify"):
+            logits, taps = target.forward(block_ids, start)
+        with _t("logits_cpu"):
+            logits = logits.cpu()
 
         if temperature > 0:
             target_probs = _sampling_probs(logits, temperature, top_p, top_k)
@@ -358,9 +400,10 @@ def dflash_generate(
             else:
                 acceptance_length, bonus = 0, _sample_probs(target_probs[:, -1])[0]
         else:
-            posterior = torch.argmax(logits, dim=-1)
-            acceptance_length = (block_ids[:, 1:] == posterior[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()
-            bonus = posterior[:, acceptance_length][0]
+            with _t("accept"):
+                posterior = torch.argmax(logits, dim=-1)
+                acceptance_length = (block_ids[:, 1:] == posterior[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()
+                bonus = posterior[:, acceptance_length][0]
             _dump_step(start, block_ids, posterior, acceptance_length)
 
         output_ids[:, start : start + acceptance_length + 1] = block_ids[:, : acceptance_length + 1]
@@ -385,13 +428,16 @@ def dflash_generate(
             else:
                 # The target recomputes from its own anchor, so the rejected tail never happened
                 # and the taps already in hand are correct. No replay.
-                pending_taps.append(_taps_head(target, taps, produced))
+                with _t("taps_head"):
+                    pending_taps.append(_taps_head(target, taps, produced))
         else:
-            pending_taps.append(_taps_head(target, taps, produced))
+            with _t("taps_head"):
+                pending_taps.append(_taps_head(target, taps, produced))
 
         start += produced
         acceptance_lengths.append(produced)
 
+    _t.report(len(acceptance_lengths))
     output_ids = output_ids[:, : min(start + 1, max_length)]
     if not return_stats:
         return output_ids

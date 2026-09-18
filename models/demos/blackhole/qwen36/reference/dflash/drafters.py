@@ -160,8 +160,13 @@ class TtDrafter:
         sb = d.alloc_step_buffers(q_len=q_len, ctx_pad=ctx_pad)
         dev = d.device
 
-        # Warm with the SAME shapes the capture will record: an un-warmed capture records JIT
-        # compilation instead of the step. Contents are irrelevant, only programs are being built.
+        # The warm-up below stages a SYNTHETIC step (start == new_ctx == ctx_pad), so the history
+        # must start empty or propose's own bookkeeping assert fires --
+        # "context is at 53 + 16 new rows but the block starts at 16". 53 is where a preceding
+        # generation left it, and a preceding generation is mandatory (the capture must not be the
+        # thing that compiles the loop's programs), so every legal caller hits this. Reset here
+        # rather than making each one remember; the caller's next dflash_generate resets again.
+        d.reset()
         d.stage_step(start=ctx_pad, new_ctx=ctx_pad)
         d.stage_tokens(torch.zeros(1, q_len, dtype=torch.long))
         d._staged_new_ctx = ctx_pad

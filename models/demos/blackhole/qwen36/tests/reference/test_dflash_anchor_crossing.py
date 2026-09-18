@@ -143,7 +143,12 @@ def test_acceptance_across_the_anchor(mesh_device, device_params, max_new_tokens
     # replay is wrong at a non-zero chunk_start" from "re-anchoring is wrong however it is run".
     traced = os.environ.get("DFLASH_NO_TRACE") != "1"
     if traced:
-        target.enable_traced_verify()
+        # Follow the DEMO's default (DFLASH_NARROW_HEAD=1), not the wide head. This file measured
+        # the wide head for a long time, which is a configuration nothing ships: it reads the whole
+        # [1, 1, bucket, vocab] logits tensor (~63 MB) back every step instead of a 32/64-row
+        # tile-aligned window. That made every throughput number here incomparable with
+        # tests/perf/test_dflash_anchor_size_ab.py, which is the one quoted against production.
+        target.enable_traced_verify(narrow_head=os.environ.get("DFLASH_NARROW_HEAD", "1") != "0")
         # Follow the env var rather than forcing it: with this hardcoded True, the arm meant
         # to measure the EAGER fallback silently measured the broken traced path instead.
         target.allow_trace_past_anchor = os.environ.get("DFLASH_TRACE_PAST_ANCHOR") == "1"

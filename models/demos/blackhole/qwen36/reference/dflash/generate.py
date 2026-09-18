@@ -269,6 +269,11 @@ class _StepTimer:
     def __init__(self):
         self.on = os.environ.get("DFLASH_TIME_STEPS") == "1"
         self.acc, self.n = {}, 0
+        # Per-step verify times. The AGGREGATE hides the shape: a crossing run's verify averages
+        # 336 ms against 166 ms for one that never crosses, and the mean cannot say whether that is
+        # one enormous step (the crossing itself: an eager whole-bucket forward plus a ~3 s
+        # re-capture) or every post-anchor step being slower. Those have completely different fixes.
+        self.per_step = []
 
     def __call__(self, phase):
         timer = self
@@ -279,7 +284,10 @@ class _StepTimer:
 
             def __exit__(self, *a):
                 if timer.on:
-                    timer.acc[phase] = timer.acc.get(phase, 0.0) + (time.perf_counter() - self.t0) * 1000
+                    ms = (time.perf_counter() - self.t0) * 1000
+                    timer.acc[phase] = timer.acc.get(phase, 0.0) + ms
+                    if phase == "verify":
+                        timer.per_step.append(ms)
 
         return _Ctx()
 
@@ -290,6 +298,16 @@ class _StepTimer:
         print(f"\n>>> STEP BREAKDOWN over {steps} steps ({total / steps:.1f} ms/step measured here)")
         for phase, ms in sorted(self.acc.items(), key=lambda kv: -kv[1]):
             print(f">>>   {phase:<12} {ms / steps:7.1f} ms/step  ({100 * ms / total:5.1f} %)")
+        if self.per_step:
+            v = self.per_step
+            worst = max(range(len(v)), key=lambda i: v[i])
+            rest = [x for i, x in enumerate(v) if i != worst]
+            print(f">>>   verify per step: {' '.join(f'{x:.0f}' for x in v)}")
+            print(
+                f">>>   verify: worst step #{worst} = {v[worst]:.0f} ms; "
+                f"median of the rest {sorted(rest)[len(rest) // 2]:.0f} ms; "
+                f"mean of the rest {sum(rest) / max(len(rest), 1):.0f} ms"
+            )
         print()
 
 

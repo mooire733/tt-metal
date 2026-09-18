@@ -26,6 +26,9 @@ import os
 from typing import Any, Protocol, runtime_checkable
 
 import torch
+from loguru import logger
+
+from models.tt_transformers.tt.common import get_block_size
 
 
 @runtime_checkable
@@ -508,6 +511,8 @@ class TtTarget:
             token_buf = torch.zeros(1, self.ANCHOR, dtype=self._tokens.dtype)
             token_buf[:, :length] = self._tokens[:, lo:hi]
             logits = self.model.verify_traced(token_buf, length, lo, self.page_table, self.ANCHOR, keep_rows=keep_rows)
+            if os.environ.get("DFLASH_VERIFY_DUAL") == "1":
+                self._dual_check(lo, hi, length, keep_rows, logits)
         else:
             logits = self.model.prefill_block_all_logits(
                 self._tokens[:, lo:hi],
@@ -518,6 +523,185 @@ class TtTarget:
                 keep_rows=keep_rows,
             )
         return logits, self.model.take_taps(length)
+
+    def _recapture_after_anchor(self):
+        """Re-take the verify trace when the anchor advances.
+
+        NOT OPTIONAL when the trace is used past an anchor -- it is what makes that path correct, so
+        it is enabled with it rather than behind its own switch. ``DFLASH_RECAPTURE_ON_ANCHOR=0``
+        opts out for A/B measurement ONLY: that combination is known to emit token soup.
+
+        WHY. Crossing an anchor runs a WHOLE-BUCKET forward, and a whole bucket is `length ==
+        ANCHOR`, which `_run` sends down the EAGER fallback. That eager forward allocates heavily
+        while the trace is parked and lands on the trace's own buffers: measured in-loop with
+        DFLASH_VERIFY_DUAL=1, every traced verify after the crossing returns ALL-ZERO logits
+        (argmax agreement 0.0000, cosine 0.000000 then nan against an eager recomputation of the
+        same step), while every step before it agrees exactly. The trace is not subtly wrong past an
+        anchor -- it is dead, and the drafter's "every draft rejected" is the downstream symptom.
+
+        That is why every isolated reproduction passed: one eager pass and one replay leaves a
+        different allocator history than twenty-odd replays followed by an eager whole bucket.
+
+        IT IS THE WHOLE WORKING SET, NOT THE OUTPUT. Pre-allocating the trace's output buffer
+        outside the capture window (ttnn.allocate_tensor_on_device + a ttnn.copy at the end of the
+        captured body) changed the post-anchor acceptance by NOTHING -- 1.116, digit for digit with
+        the unprotected run. Every intermediate the captured graph allocates lives in the capture
+        window too, so the replay computes through memory it no longer owns and the copy faithfully
+        copies garbage. Protecting buffers one at a time cannot work; the only alternative to
+        re-capturing is to never run an eager forward while the trace is parked, which means
+        tracing the crossing itself. Splitting the crossing into two traced 64-row halves was the
+        cheap way to do that and is REFUTED (tests/unit/test_split_bucket_crossing.py: argmax
+        agreement 0.7500).
+
+        COST, measured: 1.86-2.29 s per crossing, i.e. per 128 tokens -- about 10 % of a 200-token
+        generation and a larger share as length grows. What it buys, on the gen200 arm of
+        tests/reference/test_dflash_anchor_crossing.py, against the eager fallback:
+
+            eager fallback          acceptance after the anchor 4.529   4.79 tok/s
+            traced, no recapture                                1.116   5.24 tok/s, 20 non-ascii
+            traced + recapture                                  4.529   8.20/8.40/8.78 tok/s
+
+        Acceptance is IDENTICAL to eager (the tokens are byte-identical), so the 1.75x is free.
+        """
+        if not getattr(self, "_traced_verify", False):
+            return
+        # Only the past-anchor traced path needs this: with the eager fallback the trace is never
+        # replayed after a crossing, so there is nothing to keep alive.
+        if not (self.allow_trace_past_anchor or os.environ.get("DFLASH_TRACE_PAST_ANCHOR") == "1"):
+            return
+        if os.environ.get("DFLASH_RECAPTURE_ON_ANCHOR") == "0":
+            return
+        import time as _time
+
+        _t0 = _time.perf_counter()
+        self.model.release_verify_trace()
+        self.model.capture_verify_trace(
+            self._capture_page_table(), self.ANCHOR, narrow_head=getattr(self, "_narrow_head", False)
+        )
+        self._recaptures = getattr(self, "_recaptures", 0) + 1
+        logger.info(
+            f"[dflash] re-captured verify trace at anchor {self._anchor} "
+            f"in {_time.perf_counter() - _t0:.2f}s (#{self._recaptures})"
+        )
+
+    def _capture_page_table(self):
+        """Spare pages for the CAPTURE's throwaway forwards. See :meth:`_recapture_after_anchor`.
+
+        A capture is not a dry run: it executes a warm-up forward, the narrow-head probe and the
+        captured body itself, each over ``bucket`` ZERO tokens at ``chunk_start=0``, and each ends
+        in a ``paged_fill_cache``. Handed the LIVE page table those writes land on the pages holding
+        the bucket that just completed -- zeroing the KV history every later step attends back over.
+        That is invisible to ``_dual_check``, because the traced and eager recomputations read the
+        same zeroed pages and agree with each other while both are wrong.
+
+        So point the capture at the table's LAST pages instead. ``verify_traced`` re-stages the real
+        table on every replay (``stage_verify_inputs`` rewrites ``_vt_full_pt``/``_vt_chunk_pt``),
+        so no part of the real mapping is baked into the trace. If the sequence has grown far enough
+        to reach those pages there is nowhere safe to put them, and we return the live table rather
+        than alias a page in use -- no worse than before this fix, and never silently aliasing.
+        """
+        return self.capture_page_table(
+            self.page_table, self._anchor, get_block_size(self.model._paged_kv_caches), self.ANCHOR
+        )
+
+    @staticmethod
+    def capture_page_table(page_table, anchor, block_size, bucket):
+        """The page table a capture should run against: the bucket remapped onto the LAST pages.
+
+        Split out from :meth:`_capture_page_table` so the arithmetic is testable without a mesh
+        (tests/unit/test_capture_page_table.py). The capture writes ``bucket`` rows starting at
+        ``chunk_start=0``, which ``paged_fill_cache`` maps onto the FIRST ``bucket // block_size``
+        entries -- so those are the entries to redirect, and only those.
+
+        Returns the table UNCHANGED when the sequence has grown close enough to the end that the
+        spare pages are no longer spare. Aliasing a page the sequence is about to use would trade
+        this bug for a worse one, so the degraded case is "no protection", never "wrong pages".
+        """
+        n_blocks = page_table.shape[1]
+        per_bucket = bucket // block_size
+        # Pages the sequence can still reach, with one bucket of headroom.
+        live = -(-(anchor + 2 * bucket) // block_size)
+        if n_blocks - per_bucket < live:
+            return page_table
+        scratch = page_table.clone()
+        scratch[:, :per_bucket] = page_table[:, n_blocks - per_bucket :]
+        return scratch
+
+    def _dual_check(self, lo, hi, length, keep_rows, traced_logits):
+        """Recompute this verify EAGERLY from the same anchor state and compare. Diagnostic only.
+
+        Every isolated reproduction of the anchor defect has come back clean -- a single traced
+        verify at chunk_start=128 is pcc 1.0 against eager, with the loop's own snapshot discipline
+        (tests/unit/test_verify_traced_at_offset.py) -- while the loop still collapses after a
+        crossing (acceptance 4.357 before, 1.090 after). So the defect needs the loop's actual
+        SEQUENCE, and the only way to see it is to check every verify in place, as it happens.
+
+        Restores the anchor GDN state first so the eager recomputation starts where the traced one
+        did, and leaves the TRACED result in force: this measures the shipping path, it does not
+        repair it. The eager pass rewrites the same paged-KV rows with the same values, which is
+        idempotent, and re-takes the taps so the caller's take_taps() still finds them.
+
+        KNOW WHAT THIS CANNOT SEE. Both sides read the same paged KV and the same anchor snapshot,
+        so any corruption of THOSE is invisible here -- the two agree with each other while both are
+        wrong. That is not hypothetical: while the capture was zeroing the KV pages of the bucket it
+        had just finished (see _capture_page_table), this check reported argmax agreement 1.0000 and
+        per-layer tap cosines of 0.999987 on every step, and the acceptance loss it was supposed to
+        explain was real the whole time. Agreement is only evidence of correctness when the two
+        sides do not share their inputs.
+        """
+        import torch as _torch
+
+        def _host_taps(t):
+            if not self.device_taps:
+                return [t.float()]
+            import ttnn as _ttnn
+
+            return [_ttnn.to_torch(x, mesh_composer=_ttnn.ConcatMeshToTensor(x.device(), dim=-1)).float() for x in t]
+
+        # Take the TRACED taps now, before the eager pass overwrites them. They are what the drafter
+        # actually eats, and comparing only logits would miss a defect that lives in them -- which is
+        # exactly the shape of the residual this is chasing: with recapture the logits agree exactly
+        # (argmax 1.0000) while acceptance across the boundary is still 3.348 against 4.357 before.
+        traced_taps = _host_taps(self.model.take_taps(length))
+
+        self.model.restore_gdn_state(self._anchor_gdn)
+        eager_logits = self.model.prefill_block_all_logits(
+            self._tokens[:, lo:hi],
+            self.page_table,
+            actual_len=length,
+            chunk_start=lo,
+            bucket=self.ANCHOR,
+            keep_rows=keep_rows,
+        )
+        eager_taps = _host_taps(self.model.take_taps(length))
+
+        step = getattr(self, "_dual_step", 0)
+        self._dual_step = step + 1
+        if traced_logits is not None and eager_logits is not None:
+            a, b = traced_logits.float(), eager_logits.float()
+            same_argmax = float((a.argmax(-1) == b.argmax(-1)).float().mean())
+            denom = (a.norm() * b.norm()).clamp_min(1e-12)
+            cos = float((a.flatten() @ b.flatten()) / denom)
+            # Taps are compared per layer; report the WORST, since one bad tap layer is enough to
+            # ruin the draft even when every other layer and the logits are perfect.
+            tap_cos = []
+            for x, y in zip(traced_taps, eager_taps):
+                d = (x.norm() * y.norm()).clamp_min(1e-12)
+                tap_cos.append(float((x.flatten() @ y.flatten()) / d))
+            worst = min(tap_cos) if tap_cos else float("nan")
+            flag = "  <-- TRACED != EAGER" if (same_argmax < 1.0 or worst < 0.999) else ""
+            print(
+                f"[dual] step {step:3d}  lo={lo:4d} hi={hi:4d} len={length:3d} anchor={self._anchor:4d}  "
+                f"argmax_agree={same_argmax:.4f} logit_cos={cos:.6f} tap_cos_worst={worst:.6f}"
+                f" taps=[{' '.join(f'{c:.4f}' for c in tap_cos)}]{flag}",
+                flush=True,
+            )
+        # Re-run the traced verify so the state the loop carries forward is the traced one, and so
+        # take_taps() finds the traced taps rather than the eager ones.
+        self.model.restore_gdn_state(self._anchor_gdn)
+        token_buf = _torch.zeros(1, self.ANCHOR, dtype=self._tokens.dtype)
+        token_buf[:, :length] = self._tokens[:, lo:hi]
+        self.model.verify_traced(token_buf, length, lo, self.page_table, self.ANCHOR, keep_rows=keep_rows)
 
     def enable_traced_verify(self, warm_tokens=None, narrow_head=False):
         """Capture the verify trace and route :meth:`_run` through it.
@@ -551,6 +735,7 @@ class TtTarget:
         # change measured nowhere yet, and the whole-bucket head is the shipped, trusted path.
         self.model.capture_verify_trace(self.page_table, self.ANCHOR, warm_tokens=warm_tokens, narrow_head=narrow_head)
         self._traced_verify = True
+        self._narrow_head = narrow_head
 
     def forward(self, ids, start, *, all_logits=True):
         """Run ``ids`` at absolute ``start``; ``all_logits`` is ignored (a bucket computes all rows).
@@ -607,6 +792,11 @@ class TtTarget:
             # The snapshot no longer holds the sequence-start zeros, so the next reset() must retake
             # it rather than keep these buffers. See reset().
             self._anchor_gdn_dirty = True
+            # ORDER MATTERS: the snapshot is taken FIRST. A capture runs real forwards, which
+            # advance all 48 GDN recurrent states; recapturing before this line snapshotted that
+            # polluted state, and every later _run() restores from it. See
+            # _recapture_after_anchor.
+            self._recapture_after_anchor()
         # The partial tail bucket — where a speculative block always lands.
         lg, tp = self._run(self._anchor, end, keep_rows=want if narrow else None)
         logit_parts.append(lg)

@@ -50,6 +50,7 @@ candidate accept position inside the block, making rollback a state select inste
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import torch
@@ -234,6 +235,26 @@ def _taps_head(target, taps, rows):
     return taps[:, :rows]
 
 
+def _dump_step(start, block_ids, posterior, accepted):
+    """Env-gated per-step dump: the drafted block next to the target's own argmax.
+
+    ``DFLASH_DUMP_STEPS`` is a comma-separated list of absolute ``start`` positions. At each listed
+    step this prints the drafted token ids and the argmax the target answered with, which is what
+    tells two arms that disagree on acceptance apart: identical drafts with a different argmax
+    means the TARGET diverged, different drafts means the DRAFTER did. Reading the means, or even
+    the per-step accepted lengths, cannot distinguish those two.
+    """
+    steps = os.environ.get("DFLASH_DUMP_STEPS")
+    if not steps or str(start) not in steps.split(","):
+        return
+    draft = block_ids[0, 1:].tolist()
+    arg = posterior[0, :-1].tolist()
+    print(f"\n>>> DUMP start={start} accepted={accepted} anchor_tok={int(block_ids[0, 0])}")
+    print(f">>> DUMP drafted={draft}")
+    print(f">>> DUMP argmax ={arg}")
+    print(f">>> DUMP match  ={[int(d == a) for d, a in zip(draft, arg)]}\n")
+
+
 @torch.inference_mode()
 def dflash_generate(
     drafter,
@@ -340,6 +361,7 @@ def dflash_generate(
             posterior = torch.argmax(logits, dim=-1)
             acceptance_length = (block_ids[:, 1:] == posterior[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()
             bonus = posterior[:, acceptance_length][0]
+            _dump_step(start, block_ids, posterior, acceptance_length)
 
         output_ids[:, start : start + acceptance_length + 1] = block_ids[:, : acceptance_length + 1]
         output_ids[:, start + acceptance_length + 1] = bonus

@@ -144,7 +144,9 @@ def test_acceptance_across_the_anchor(mesh_device, device_params, max_new_tokens
     traced = os.environ.get("DFLASH_NO_TRACE") != "1"
     if traced:
         target.enable_traced_verify()
-        target.allow_trace_past_anchor = True
+        # Follow the env var rather than forcing it: with this hardcoded True, the arm meant
+        # to measure the EAGER fallback silently measured the broken traced path instead.
+        target.allow_trace_past_anchor = os.environ.get("DFLASH_TRACE_PAST_ANCHOR") == "1"
 
     t0 = time.perf_counter()
     stats = dflash_generate(drafter, target, prompt, max_new_tokens=max_new_tokens, return_stats=True)
@@ -197,3 +199,35 @@ def test_acceptance_across_the_anchor(mesh_device, device_params, max_new_tokens
     # prose and a <think> block; a healthy run has essentially none.
     non_ascii = sum(1 for ch in text if ord(ch) > 127)
     logger.info(f"      non-ascii chars in output: {non_ascii} / {len(text)}")
+
+    # THE ASSERTION THIS FILE WAS MISSING. Greedy verification pins the TOKENS whatever the trace
+    # does wrong, so a run whose acceptance has collapsed to ~1.0 still emits " Paris." and still
+    # reads as fluent English -- it just buys nothing, because every draft is rejected. Both checks
+    # above pass in that state: measured, a crossing with a corrupted trace gives acceptance 1.116
+    # after the anchor against 4.529 before, with 0 non-ascii characters, and this test reported
+    # PASSED. Acceptance is the thing the file exists to measure, so assert on it directly.
+    if crossed_at is not None:
+        before = [p for _, _, p, _ in rows[:crossed_at]]
+        after = [p for _, _, p, _ in rows[crossed_at:]]
+        mb = sum(before) / max(len(before), 1)
+        ma = sum(after) / max(len(after), 1)
+        assert ma > 0.6 * mb, (
+            f"acceptance collapsed across the anchor: {mb:.3f} before, {ma:.3f} after. The verify "
+            f"trace is being corrupted by the whole-bucket eager forward at the crossing -- see "
+            f"TtTarget._recapture_after_anchor and DFLASH_HANDOFF.md"
+        )
+    # These two assertions exist because this file once reported "1 passed" on a run whose
+    # post-anchor acceptance had collapsed to 1.116 with 20 non-ascii chars in the output: the only
+    # gates were the " Paris." prefix (which survives any corruption, since row 0 of a block is
+    # always the confirmed anchor token) and a non-asserting log line. A test that stays green
+    # through the exact failure it exists to detect is worse than no test.
+    assert non_ascii <= 2, f"output contains {non_ascii} non-ascii chars -- the token-soup signature"
+    if crossed_at is not None:
+        after_mean = sum(p for _, _, p, _ in rows[crossed_at:]) / max(len(rows) - crossed_at, 1)
+        before_mean = sum(p for _, _, p, _ in rows[:crossed_at]) / max(crossed_at, 1)
+        # Acceptance may legitimately drift across a boundary; it must not COLLAPSE. Halving is far
+        # outside anything content variation has produced here (eager measures 4.357 -> 4.529).
+        assert after_mean > before_mean / 2, (
+            f"acceptance collapsed across the anchor: {before_mean:.3f} before, {after_mean:.3f} "
+            f"after -- the trace is being corrupted by the crossing"
+        )

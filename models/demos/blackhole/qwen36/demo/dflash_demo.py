@@ -29,10 +29,15 @@ dispatch saves (tests/reference/test_dflash_drafter_trace.py).
 
 Run::
 
-    DFLASH_RUN_TARGET=1 MESH_DEVICE=T3K HF_MODEL=Qwen/Qwen3.6-27B \\
-      DFLASH_HF_MODEL=z-lab/Qwen3.6-27B-DFlash \\
-      TT_CACHE_PATH=$HOME/.cache/tt_cache/Qwen3.6-27B \\
-      pytest models/demos/blackhole/qwen36/demo/dflash_demo.py -v -s
+    export DFLASH_RUN_TARGET=1
+    export MESH_DEVICE=T3K
+    export HF_MODEL=Qwen/Qwen3.6-27B
+    export DFLASH_HF_MODEL=z-lab/Qwen3.6-27B-DFlash
+    export TT_CACHE_PATH=$HOME/.cache/tt_cache/Qwen3.6-27B
+    pytest models/demos/blackhole/qwen36/demo/dflash_demo.py -v -s
+
+Override the prompt with DFLASH_PROMPT. Note the default prompt is 128 tokens, so it crosses the
+anchor on the very first step; a short prompt exercises the non-crossing path instead.
 
     # one case
     ... pytest models/demos/blackhole/qwen36/demo/dflash_demo.py -v -s -k "spec_128"

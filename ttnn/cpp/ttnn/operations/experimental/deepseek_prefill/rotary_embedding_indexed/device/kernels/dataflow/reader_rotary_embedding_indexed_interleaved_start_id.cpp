@@ -64,16 +64,26 @@ void kernel_main() {
     Scratchpad<volatile uint32_t> meta(scratch::meta);
     noc.async_read(s_meta, meta, 4, {.page_id = 0}, {.offset_bytes = 0});
     noc.async_read_barrier();
-    // The metadata tensor lives at a FIXED DRAM address reused across every chunk/layer/rope call;
-    // the host updates its contents in place each chunk. After the NoC writes the fresh value into
-    // this core's meta scratchpad, the RISC data cache may still hold the PREVIOUS chunk's value for
-    // that L1 line: async_read_barrier orders the DMA but does NOT invalidate the RISC cache, and
-    // `volatile` forces a load but still reads the cached line. Whether the line was evicted is
-    // timing-dependent, so without this invalidate the read is intermittently STALE -> a wrong
-    // rotation offset that compounds (the L61 metadata KV-PCC run-to-run non-determinism).
-    // invalidate_l1_cache() forces a refetch of the freshly-DMA'd value.
+    // The metadata tensor lives at a FIXED DRAM address reused across every chunk/layer/rope call; the
+    // host updates its contents in place each chunk, so this core's meta scratchpad L1 line may still
+    // hold the PREVIOUS chunk's value after the NoC write. async_read_barrier orders the DMA but does
+    // NOT make the CPU read coherent with it, so the staged value has to be read past the RISC cache.
+    // On Quasar DM the CPU's private L1 D$ / L2 are not coherent with the NoC write to shared L1 (TL1):
+    // invalidate_l1_cache() is a no-op there and the Scratchpad's own address is cacheable, so read
+    // through the uncached L1 alias (base + MEM_L1_UNCACHED_BASE) -- what the old
+    // DataflowBuffer::get_write_ptr() did for this path, and what indexed_fill_reader.cpp does. On WH/BH
+    // the CPU/NoC are coherent (write-through / no D$), so invalidate_l1_cache() + a plain read suffice.
+    // Without this the read is intermittently STALE -> a wrong rotation offset that compounds (the
+    // metadata KV-PCC run-to-run non-determinism).
+#if defined(ARCH_QUASAR) && defined(COMPILE_FOR_DM)
+    volatile tt_l1_ptr uint32_t* meta_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
+        static_cast<uintptr_t>(meta.get_base_address()) + MEM_L1_UNCACHED_BASE);
+#else
     invalidate_l1_cache();
-    const uint32_t kv_actual_global = meta[0];  // the 1-element tensor holds kv_actual_global directly
+    volatile tt_l1_ptr uint32_t* meta_ptr =
+        reinterpret_cast<volatile tt_l1_ptr uint32_t*>(static_cast<uintptr_t>(meta.get_base_address()));
+#endif
+    const uint32_t kv_actual_global = meta_ptr[0];  // the 1-element tensor holds kv_actual_global directly
 #else
     const uint32_t kv_actual_global = get_arg(args::kv_actual_global);
 #endif

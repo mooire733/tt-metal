@@ -116,6 +116,44 @@ however broken the trace is, so a run where every draft is rejected still emits 
 reads as fluent English — it just buys nothing. The file now asserts post-anchor acceptance stays
 within 60 % of pre-anchor. Any test whose subject is acceptance must assert on acceptance.
 
+### ACCEPTANCE TRACKS HOW FORMULAIC THE TEXT IS -- quote no speedup without the thinking mode (2026-09-21)
+
+Same model, same question, only the assistant seed differing (DFLASH_PROMPT, 3.6, spec_128 path):
+
+    <|im_start|>assistant\n<think>\n              19.48 tok/s  acceptance 5.500  1.09x production
+    <|im_start|>assistant\n<think>\n\n</think>\n\n  10.54 tok/s  acceptance 3.094  0.59x production
+
+**Turning thinking off costs 44 % of acceptance and 46 % of throughput, and turns DFlash from a
+modest win into a substantial LOSS against plain decode.** Every figure measured across 3.6 and 3.8
+lines up on the same axis -- acceptance tracks how predictable the generated text is, not the model
+and not the hardware:
+
+| generated content | acceptance | vs that model's plain decode |
+|---|---|---|
+| reasoning block, Qwen3.8 demo prompt | 7.615 | 1.62x |
+| reasoning seeded, this A/B (3.6) | 5.500 | 1.09x |
+| reasoning block, Qwen3.6 demo prompt | 4.950 | 0.98x |
+| raw prose (capitals list), crossing suite | 4.2-4.6 | 0.63-0.95x |
+| direct answer, thinking OFF (3.6) | 3.094 | 0.59x |
+
+Per-step cost is IDENTICAL across all of it (verify median 160-167 ms on both models), so none of
+this spread is silicon -- it is entirely how many tokens a step commits.
+
+CONSEQUENCES.
+
+* A DFlash speedup number without its thinking mode and prompt is not interpretable. The demo's
+  headline cases seed `<think>`, which is the favourable end of this range.
+* For traffic with thinking disabled, DFlash as it stands is a REGRESSION (0.59x). That is a
+  shipping-policy fact, not a bug to fix.
+* Chasing step time is worth less than it looks. Acceptance moves 1.8x across ordinary prompts while
+  the best step-time work of 2026-09-18 moved throughput 1.17 -> 1.32x.
+
+A TRAP WORTH KNOWING. `QWEN35_NO_THINK=1` does NOTHING for the demo: `text_demo._get_prompt` returns
+the raw prompt file at `seqlen <= 256` before it ever reads the flag, which only applies on the
+long-context path. Setting it and seeing acceptance unchanged at 4.950 to three decimals looks like
+"thinking does not matter" and is really "the prompt never changed". Drive the distinction through
+DFLASH_PROMPT with explicit chat templates, as above.
+
 ### DFlash2 (qwen36-dflash-dual / -batch / prefill-opt-dflash) IS BLACKHOLE-ONLY — measured 2026-09-21
 
 Those branches carry a much faster speculative path, and it is worth knowing exactly what does and

@@ -117,7 +117,8 @@ cxxopts::Options create_validation_options() {
         "Do not retrain or reset missing Ethernet links; report them and continue",
         cxxopts::value<bool>()->default_value("false"))(
         "cross-host-port-down",
-        "Bring down all detected cross-host Ethernet ports and exit",
+        "Bring down all cross-host Ethernet ports (from golden connectivity) and exit; requires "
+        "--cabling-descriptor/--deployment-descriptor or --fsd-path",
         cxxopts::value<bool>()->default_value("false"))("h,help", "Print usage information");
 
     return options;
@@ -375,7 +376,16 @@ int main(int argc, char* argv[]) {
     auto physical_system_descriptor = generate_physical_system_descriptor(input_args);
 
     if (input_args.cross_host_port_down) {
-        bring_down_cross_host_ethernet_ports(physical_system_descriptor);
+        TT_FATAL(
+            input_args.cabling_descriptor_path.has_value() || input_args.fsd_path.has_value(),
+            "--cross-host-port-down requires a golden reference: pass --cabling-descriptor (with "
+            "--deployment-descriptor for multi-host) or --fsd-path");
+        auto fsd_proto = get_factory_system_descriptor(
+            input_args.cabling_descriptor_path,
+            input_args.deployment_descriptor_path,
+            input_args.fsd_path,
+            physical_system_descriptor.get_all_hostnames());
+        bring_down_cross_host_ethernet_ports(fsd_proto, physical_system_descriptor);
         return 0;
     }
 

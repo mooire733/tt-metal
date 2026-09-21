@@ -1628,20 +1628,21 @@ void reset_cross_node_ethernet_links(
     distributed_context.barrier();
 }
 
-void bring_down_cross_host_ethernet_ports(const PhysicalSystemDescriptor& physical_system_descriptor) {
+void bring_down_cross_host_ethernet_ports(
+    const fsd::proto::FactorySystemDescriptor& fsd_proto, PhysicalSystemDescriptor& physical_system_descriptor) {
     auto& cluster = tt::tt_metal::MetalContext::instance().get_cluster();
     TT_FATAL(cluster.arch() == tt::ARCH::BLACKHOLE, "Cross-host port down is only supported on Blackhole");
 
-    tt::tt_metal::AsicTopology full_topology;
-    for (const auto& hostname : physical_system_descriptor.get_all_hostnames()) {
-        const auto& host_topology = physical_system_descriptor.get_asic_topology(hostname);
-        for (const auto& [asic_id, connections] : host_topology) {
-            full_topology.emplace(asic_id, connections);
-        }
-    }
+    // Determine cross-host links from the golden Factory System Descriptor rather than the discovered
+    // topology. Discovery only reports links that trained, so a cross-host link that failed to train
+    // would never be brought down. The golden connectivity lists every expected connection, which is
+    // exactly the set we want to quiesce before a reset cycle.
+    const auto golden_connections = tt::scaleout_tools::get_all_fsd_connections(fsd_proto);
+    tt::tt_metal::AsicTopology golden_topology =
+        generate_asic_topology_from_connections(golden_connections, physical_system_descriptor);
 
     std::vector<EthChannelIdentifier> local_cross_host_endpoints;
-    get_cross_node_ethernet_links_to_reset(physical_system_descriptor, full_topology, local_cross_host_endpoints);
+    get_cross_node_ethernet_links_to_reset(physical_system_descriptor, golden_topology, local_cross_host_endpoints);
 
     log_warning(
         tt::LogDistributed, "Bringing down {} local cross-host Ethernet endpoints", local_cross_host_endpoints.size());
@@ -1728,10 +1729,33 @@ tt::tt_metal::AsicTopology generate_asic_topology_from_connections(
     for (const auto& connection : physical_connections) {
         auto src = connection.first;
         auto dst = connection.second;
-        auto src_asic_id = physical_system_descriptor.get_asic_id(
-            src.hostname, tt::tt_metal::TrayID(*src.tray_id), tt_metal::ASICLocation(src.asic_channel.asic_location));
-        auto dst_asic_id = physical_system_descriptor.get_asic_id(
-            dst.hostname, tt::tt_metal::TrayID(*dst.tray_id), tt_metal::ASICLocation(dst.asic_channel.asic_location));
+        tt_metal::AsicID src_asic_id;
+        tt_metal::AsicID dst_asic_id;
+        try {
+            src_asic_id = physical_system_descriptor.get_asic_id(
+                src.hostname,
+                tt::tt_metal::TrayID(*src.tray_id),
+                tt_metal::ASICLocation(src.asic_channel.asic_location));
+            dst_asic_id = physical_system_descriptor.get_asic_id(
+                dst.hostname,
+                tt::tt_metal::TrayID(*dst.tray_id),
+                tt_metal::ASICLocation(dst.asic_channel.asic_location));
+        } catch (const std::exception& e) {
+            // An endpoint references an ASIC that was not discovered (e.g. a fully-missing board).
+            // Skip this connection rather than aborting so that port-down/reset can proceed for the
+            // remaining links.
+            log_warning(
+                tt::LogDistributed,
+                "Skipping connection with undiscovered ASIC ({} tray {} asic {} <-> {} tray {} asic {}): {}",
+                src.hostname,
+                *src.tray_id,
+                src.asic_channel.asic_location,
+                dst.hostname,
+                *dst.tray_id,
+                dst.asic_channel.asic_location,
+                e.what());
+            continue;
+        }
         if (!visited[src_asic_id].contains(dst_asic_id)) {
             asic_topology[src_asic_id].push_back(
                 {dst_asic_id,

@@ -237,19 +237,29 @@ def test_demo_dflash(mesh_device, device_params, seqlen, max_generated_tokens, r
     if cap is not None:
         logger.info(f"fixed-capacity drafter ({cap} rows); warming every block width before capture")
         drafter.drafter.warm_block_widths()
-        # NOT enabled: allow_trace_past_anchor is UNSAFE in general.
+        # ENABLED (DFLASH_TRACE_PAST_ANCHOR=0 opts out). This was off for a long time, and the
+        # reason it was off is fixed.
         #
-        # It looked safe here and it is not. This demo's prompt is 128 tokens, so it crosses the
-        # anchor on the very FIRST decode step, with no drafting before the boundary -- the one
-        # benign case. With a 5-token prompt the crossing lands at step 28, after the drafter has
-        # accumulated history, and acceptance collapses exactly as before: 4.357 before the anchor,
-        # 1.090 after, with 31/865 non-ascii characters back in the output
-        # (tests/reference/test_dflash_anchor_crossing.py, gen256 arm, WITH fixed capacity and a
-        # stable reset). spec_128_long would cross three times and hit it too.
+        # The old reason: a crossing corrupted the verify trace, and every traced verify after it
+        # returned all-zero logits -- acceptance 4.357 before the anchor, 1.090 after, with
+        # non-ascii soup in the output. That corruption is repaired (the capture was zeroing the KV
+        # pages of the bucket it had just finished, and was snapshotting the GDN state AFTER its own
+        # warm-up forwards had advanced it; see TtTarget._recapture_after_anchor and
+        # capture_page_table). All four arms of tests/reference/test_dflash_anchor_crossing.py now
+        # pass with this on, acceptance matching the eager path exactly and zero non-ascii.
         #
-        # So the stable-context fix repaired the generation-PARITY defect but not the anchor one;
-        # they are not the same bug after all. Leave the trace restricted to lo == 0 until the
-        # crossing case is understood. Set DFLASH_TRACE_PAST_ANCHOR=1 to measure it deliberately.
+        # What leaving it off costs, measured on spec_128_long (128 + 256 tokens, one crossing):
+        # every verify past the first bucket falls back to EAGER at ~800 ms against ~200 ms traced,
+        # for the whole rest of the generation -- per-step timing shows steps 26-55 at 507-945 ms
+        # with it off and 173-205 ms with it on.
+        #
+        #     off   7.77 tok/s   128.8 ms/token   acceptance 4.554   0.43x production
+        #     on   12.35 tok/s    81.0 ms/token   acceptance 4.554   0.69x production
+        #
+        # Acceptance is IDENTICAL, so this is step time only and cannot change the tokens: greedy
+        # verification accepts exact argmax matches. The re-capture it depends on costs ~3.3 s per
+        # crossing at anchor 256 and buys back ~30 steps x ~600 ms.
+        target.allow_trace_past_anchor = os.environ.get("DFLASH_TRACE_PAST_ANCHOR", "1") != "0"
     dflash_generate(drafter, target, token_ids, max_new_tokens=max_generated_tokens)
     # DFLASH_NARROW_HEAD=1 runs the verify LM head over a 32/64-row tile-aligned window instead of
     # the whole 128-row bucket (+20.8 % on the reference prompt, tokens bit-identical -- see

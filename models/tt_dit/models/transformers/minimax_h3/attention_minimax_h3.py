@@ -88,7 +88,7 @@ class MiniMaxH3Attention(Module):
     # produced them, so this table never hit and every duration ran the fallback. 10 s and 15 s were
     # unaffected (measured == fallback); 5 s now applies (320, 384) as originally intended -- measured
     # on Blackhole's 110 SDPA cores, and not yet re-checked on Wormhole's 63. Padding buckets prompt
-    # length: at 15 s any prompt of 1-250 tokens lands on 13664. See MiniMaxH3_rows_per_device_mismatch.md.
+    # length: at 15 s any prompt of 1-250 tokens lands on 13664 (`packing.padded_sequence_length`).
     measured_sdpa_chunk_sizes = {
         4736: (320, 384),
         9184: (256, 512),
@@ -404,8 +404,7 @@ class MiniMaxH3Attention(Module):
         A shape fits if either Q mode does: resident Q (all passes' chunks stay in L1, read once) or
         the op's streamed-Q fallback (one chunk resident, re-read per pass per ring iteration).
         That gives 512 at q=224 resident, and 384 at q=320 streamed -- where the k=256 that resident
-        Q would force measured far slower (small k doubles the per-chunk flash overhead; see
-        exp_more_heads_per_row.md §9).
+        Q would force measured far slower (small k doubles the per-chunk flash overhead).
         """
         if not self.use_exp_ring_sdpa:
             return None

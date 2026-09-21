@@ -60,7 +60,7 @@ def packed_sequence_length(
     """Rows in the packed sequence. Audio contributes ``latents * MINIMAX_H3_AUDIO_CHANNELS`` rows, not
     ``latents`` -- the one place this arithmetic lives, so a harness cannot model half the audio the
     pipeline packs (which is how every M-keyed tuning table came to key on lengths the pipeline never
-    runs; see MiniMaxH3_rows_per_device_mismatch.md)."""
+    runs)."""
     return num_text_tokens + num_condition_rows + num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS + num_video_rows
 
 

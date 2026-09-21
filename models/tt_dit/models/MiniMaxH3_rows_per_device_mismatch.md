@@ -231,7 +231,7 @@ PY
 
 ## Related
 
-- `MiniMaxH3_wormhole_perf.md` — the sweep tables and the open-issues index.
+- `minimax_h3_wormhole/README.md` — the sweep tables (Part 4) and the open-issues index.
 - `MiniMaxH3_wormhole_hang.md` — the MM/RS gate hang; unrelated cause, but the same evidence-preserving
   run recipe (`TT_METAL_OPERATION_TIMEOUT_SECONDS` + `tt-triage`) would have captured the `q=128`
   SDPA hang in `e5c39cbdd47` on its first occurrence instead of wedging the board twice.

@@ -136,7 +136,7 @@ grid_88_configs = {
     (512, 8192, 5120): (4, 16, 4),
     (512, 16384, 5120): (2, 16, 8),
     (512, 32768, 5120): (4, 16, 8),
-    # MiniMax-H3 ff1, 15 s @ 768P on the WH Galaxy 8x8 AGMM grid (13664 rows/device): sweep winner, rank 1/320; keyed per-M, see MiniMaxH3_wormhole_perf.md.
+    # MiniMax-H3 ff1, 15 s @ 768P on the WH Galaxy 8x8 AGMM grid (13664 rows/device): sweep winner, rank 1/320; keyed per-M (sweep_mm_block_sizes.py on wh_4x8_ring, 2026-09-17).
     (13664, 5376, 7168): (8, 7, 10, (2, 2)),  # ff1, 15709.9 us
 }
 

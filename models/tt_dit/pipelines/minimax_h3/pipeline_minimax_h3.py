@@ -175,7 +175,7 @@ MODEL_NAME = "minimax-h3"
 # axis 0 is intra-host, while SP hides its KV all-gather inside ring attention and tolerates the
 # inter-host hop. TP=4 also fits the shapes -- 56 // 4 = 14 heads, 5376 % (32 * 4) == 0 for the norms.
 _PRESETS_BH: dict[tuple[int, ...], dict] = {
-    # One Blackhole Galaxy: the working point MiniMaxH3.md documents.
+    # One Blackhole Galaxy: the documented working point.
     (4, 8): {"tp_axis": 0, "sp_axis": 1, "num_links": 2, "topology": ttnn.Topology.Ring, "coresident": True},
     # Quad Blackhole Galaxy, 4 MPI hosts x 32 chips. Same axes, links and topology; SP goes 8 -> 32,
     # which moves the SP alignment to 32 * TILE_SIZE = 1024 and re-keys every packed length.
@@ -2001,7 +2001,7 @@ class MiniMaxH3Pipeline:
             # Host dispatch of the 50 blocks is asynchronous and takes ~0.3 s; the readback below is
             # the only blocking point in the loop, so it absorbs the whole step's device time. That
             # makes the two indistinguishable in a hang: log between them so a stalled run says
-            # which side it died on. See MiniMaxH3_wormhole_hang.md.
+            # which side it died on (this is how the mid-denoise hang was localized).
             if _log_every_step:
                 logger.info(f"  step {i + 1}/{len(timesteps)} dispatched, reading back")
 

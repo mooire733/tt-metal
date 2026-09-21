@@ -51,8 +51,8 @@ TIME_EMBED_DIM = REAL_BLOCK_CONFIG["time_embed_dim"]
 
 PATCH_SIZE = (1, 2, 2)
 VAE_SPATIAL_DOWNSAMPLE = 16  # prod(spatial_downsample_factors) from the video VAE config
-# The perf gate's prompt (`CALIBRATED_FOX_PROMPT`) tokenizes to 39, recorded at MiniMaxH3.md:311 and
-# :427. It used to be 512 here, which -- together with audio being counted once below -- put this harness
+# The perf gate's prompt (`CALIBRATED_FOX_PROMPT`) tokenizes to 39 (the model card's working point).
+# It used to be 512 here, which -- together with audio being counted once below -- put this harness
 # at 4768 / 9216 / 13632 rows/device against the pipeline's 4736 / 9184 / 13664, so every M-keyed table
 # derived from it was dead on arrival. The exact count matters less than the bucket: padding is to
 # `sp_factor * TILE` = 256 rows, so at 15 s any prompt from 1 to 250 tokens gives the same rows/device.
@@ -117,8 +117,8 @@ def test_minimax_h3_transformer_block_perf(
 ) -> None:
     skip_if_unsupported_num_links(mesh_device, num_links)
     # SP simulation emulates the 4x32 quad's per-device shard on a 4x8 mesh. On Blackhole that is the
-    # production exp-ring shape; on Wormhole it is the one shard the exp op can hold in L1 (see
-    # MiniMaxH3_wormhole_perf.md), so the sp_sim4 rows are the exp-vs-normal A/B on both parts.
+    # production exp-ring shape; on Wormhole it is the one shard the exp op can hold in L1 (its
+    # lockstep schedule keeps every pass's Q and flash state resident), so the sp_sim4 rows are the exp-vs-normal A/B on both parts.
     # Simulate a larger SP mesh (e.g. 4x32) on a smaller one (4x8) by shrinking the total sequence
     # so each device carries a shard the larger mesh would produce. `sp_simulate` is that SP ratio.
     SIM = sp_simulate

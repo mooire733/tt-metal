@@ -116,6 +116,42 @@ however broken the trace is, so a run where every draft is rejected still emits 
 reads as fluent English — it just buys nothing. The file now asserts post-anchor acceptance stays
 within 60 % of pre-anchor. Any test whose subject is acceptance must assert on acceptance.
 
+### DFlash2 (qwen36-dflash-dual / -batch / prefill-opt-dflash) IS BLACKHOLE-ONLY — measured 2026-09-21
+
+Those branches carry a much faster speculative path, and it is worth knowing exactly what does and
+does not transfer to T3K before anyone plans around them.
+
+**What they have.** `spec_decode.py` verifies T rows with a T-step GDN recurrence that writes each
+token's state into a PER-TOKEN RING; the next verify reads its initial state from the slot of the
+last ACCEPTED token. Rollback is a state SELECT, not a replay — which is verbatim the fix
+`reference/dflash/generate.py`'s module docstring calls "the real fix". With no anchor there is no
+bucket boundary, hence no crossing, no whole-bucket eager forward and no re-capture: every problem
+this file spends pages on simply does not arise there. Their verify is **49.8 ms for 8 rows** on the
+composite path (the fused `gdn_spec_step` op takes it to 37.7); ours is **166-220 ms** for a
+128-320 row bucket.
+
+**What does not transfer.** Built the `qwen36-dflash-dual` branch in a worktree and ran the op's own
+suite on T3K:
+
+    tests/ttnn/unit_tests/.../kda/test_gdn_spec_step.py -> 30 failed, 1 passed
+
+    46 x  ProgramSpec places 52 DataflowBufferSpecs per core; Gen1 (Wormhole) allows 32
+    14 x  96 (user, head) items exceed 64 cores        (Wormhole has 64; Blackhole more)
+     7 x  BH <= num_cores_avail                        (gdn_spec_step_program_factory.cpp:83)
+
+These are silicon capability limits, not parameters. The environment is not the problem: the two
+ungated host-side suites (test_spec_batch_helpers, test_spec_sampling_math) pass 156/156 in the same
+worktree. And it is not only the kernel — `spec_decode.py:17` says "TP (P150x4) only" and EVERY
+device-touching spec/dflash2 test is `@run_for_blackhole`, so the composite path has no Wormhole
+validation either. Adopting DFlash2 on T3K is a bring-up onto different silicon, not a port.
+
+**So the transferable thing is the DESIGN, not the code.** A per-token GDN state ring on our own
+Wormhole ops, making rollback a state select, is what would move our verify -- and it retires the
+anchor, the crossing, the re-capture and the anchor-sizing workaround together. That is the next
+real piece of work on this path; everything else in this file is tuning around its absence.
+
+Worktree left at /home/loudbox/akshay/tt-metal-dflash2 (built, own venv) if anyone wants to re-check.
+
 ### THE ANCHOR IS A FREE PARAMETER -- size it to the request (2026-09-18)
 
 **Read this before trying to fix the crossing again.** Five routes to removing the re-capture are

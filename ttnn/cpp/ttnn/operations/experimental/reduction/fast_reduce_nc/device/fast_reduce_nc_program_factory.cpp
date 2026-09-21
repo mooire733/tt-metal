@@ -28,6 +28,7 @@ const DFBSpecName FRNC_IN1{"frnc_in1"};  // legacy c_1 (zero tile)
 const DFBSpecName FRNC_OUT{"frnc_out"};  // legacy c_16 (output)
 const TensorParamName FRNC_INPUT{"frnc_input"};
 const TensorParamName FRNC_OUTPUT{"frnc_output"};
+const TensorParamName FRNC_OUTPUT_RIGHT{"frnc_output_right"};  // split_output_width only: second channel region
 const KernelSpecName FRNC_READER{"frnc_reader"};
 const KernelSpecName FRNC_WRITER{"frnc_writer"};
 const KernelSpecName FRNC_COMPUTE_G1{"frnc_compute_g1"};
@@ -64,12 +65,29 @@ std::tuple<uint32_t, uint32_t, uint32_t, uint32_t> extract_and_scale_spatial_dim
     return {Wt, Ht, inner_tile_size, reduce_tile_size};
 }
 
+// The tensor arguments create_program_artifacts and override_runtime_arguments both bind: the input, the
+// output and, when the output is split, the right channel region.
+decltype(tt::tt_metal::experimental::ProgramRunArgs::tensor_args) build_tensor_run_args(
+    const FastReduceNCInputs& tensor_args, std::vector<Tensor>& outputs) {
+    decltype(tt::tt_metal::experimental::ProgramRunArgs::tensor_args) tensor_run_args;
+    tensor_run_args.emplace(FRNC_INPUT, TensorArgument{tensor_args.input.mesh_tensor()});
+    tensor_run_args.emplace(FRNC_OUTPUT, TensorArgument{outputs.front().mesh_tensor()});
+    if (outputs.size() > 1) {
+        tensor_run_args.emplace(FRNC_OUTPUT_RIGHT, TensorArgument{outputs.at(1).mesh_tensor()});
+    }
+    return tensor_run_args;
+}
+
 }  // namespace
 
 ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_program_artifacts(
     const FastReduceNCParams& operation_attributes,
     const FastReduceNCInputs& tensor_args,
-    Tensor& tensor_return_value) {
+    std::vector<Tensor>& outputs) {
+    // outputs holds one tensor, or two when split_output_width is set: the left channel region and the
+    // right one.  The work split, DFBs and compute see the full-width output; only the writer routes.
+    auto& tensor_return_value = outputs.front();
+    const bool split_output = operation_attributes.split_output_width.has_value();
     ////////////////////////////////////////////////////////////////////////////
     //                      Device Setup
     ////////////////////////////////////////////////////////////////////////////
@@ -90,7 +108,8 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
     const auto [Wt, Ht, inner_tile_size, reduce_tile_size] =
         extract_and_scale_spatial_dims(input_shape, static_cast<uint32_t>(operation_attributes.dim));
     const auto num_reduce_input_tile = input_shape[operation_attributes.dim];
-    const auto num_output_tiles = tensor_return_value.physical_volume() / TILE_HW;
+    const auto num_output_tiles =
+        (tensor_return_value.physical_volume() + (split_output ? outputs.at(1).physical_volume() : 0)) / TILE_HW;
     const bool fp32_dest_acc_en =
         std::get<2>(ttnn::get_compute_kernel_config_args(device->arch(), operation_attributes.compute_kernel_config));
     // Choose granularity as the largest factor of num_reduce_input_tile that is less than or equal to 8.
@@ -153,10 +172,9 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
          num_cols_per_core_group_2] =
             divide_by_shards
                 ? dspec.core_groups_tuple()
-                : (use_sub_core_grids
-                       ? tt::tt_metal::split_work_to_cores(
-                             *operation_attributes.sub_core_grids, num_output_tiles, /*row_wise=*/true)
-                       : tt::tt_metal::split_work_to_cores(grid, num_output_tiles, /*row_wise=*/true));
+                : (use_sub_core_grids ? tt::tt_metal::split_work_to_cores(
+                                            *operation_attributes.sub_core_grids, num_output_tiles, /*row_wise=*/true)
+                                      : tt::tt_metal::split_work_to_cores(grid, num_output_tiles, /*row_wise=*/true));
     num_cols_per_core_group_1 *= shard_factor;
     num_cols_per_core_group_2 *= shard_factor;
 
@@ -170,6 +188,10 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
         TensorParameter{.unique_id = FRNC_INPUT, .spec = tensor_args.input.tensor_spec()},
         TensorParameter{.unique_id = FRNC_OUTPUT, .spec = tensor_return_value.tensor_spec()},
     };
+    if (split_output) {
+        spec.tensor_parameters.push_back(
+            TensorParameter{.unique_id = FRNC_OUTPUT_RIGHT, .spec = outputs.at(1).tensor_spec()});
+    }
 
     ////////////////////////////////////////////////////////////////////////////
     //                         DataflowBuffer Setup
@@ -225,16 +247,33 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
         .hw_config = ttnn::create_reader_datamovement_config(device->arch()),
     };
 
+    // The split writer routes every tile of a full-width output row to the left or right region.  The
+    // right region's accessor is compiled in only under SPLIT_OUTPUT: a tensor binding has to exist for
+    // every name the kernel looks up, even inside a discarded if-constexpr branch.
+    KernelSpec::CompilerOptions::Defines writer_defines;
+    if (split_output) {
+        writer_defines.emplace("SPLIT_OUTPUT", "1");
+    }
     KernelSpec writer{
         .unique_id = FRNC_WRITER,
         .source = writer_kernel_file,
+        .compiler_options = {.defines = writer_defines},
         .dfb_bindings = {DFBBinding{
             .dfb_spec_name = FRNC_OUT, .accessor_name = "out0", .endpoint_type = DFBEndpointType::CONSUMER}},
         .tensor_bindings = {TensorBinding{.tensor_parameter_name = FRNC_OUTPUT, .accessor_name = "dst"}},
-        .compile_time_args = {{"shard_factor", shard_factor}, {"num_cores_to_be_used", num_cores_to_be_used}},
+        .compile_time_args =
+            {{"shard_factor", shard_factor},
+             {"num_cores_to_be_used", num_cores_to_be_used},
+             // Width in tiles of the left region; zero keeps the full output in dst.
+             {"left_width", static_cast<uint32_t>(operation_attributes.split_output_width.value_or(0) / TILE_WIDTH)},
+             {"full_width", Wt}},
         .runtime_arg_schema = {.runtime_arg_names = {"id_range_length", "start_id"}},
         .hw_config = ttnn::create_writer_datamovement_config(device->arch()),
     };
+    if (split_output) {
+        writer.tensor_bindings.push_back(
+            TensorBinding{.tensor_parameter_name = FRNC_OUTPUT_RIGHT, .accessor_name = "dst_right"});
+    }
 
     ////////////////////////////////////////////////////////////////////////////
     //                      ComputeKernel SetUp
@@ -255,8 +294,9 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
     // Metal 2.0 requires an explicit unpack_modes entry when a compute kernel consumes a
     // Float32 DFB with enable_32_bit_dest = true. Legacy set no unpack_to_dest_mode (Default),
     // which maps to UnpackToSrc. Only the input DFB (c_0) can be Float32; the zero DFB is BF16.
+    // unpack_modes() reaches the member on whichever config generation the arch resolved to.
     if (fp32_dest_acc_en && input_data_format == tt::DataFormat::Float32) {
-        std::get<ComputeGen1Config>(compute_hw).unpack_modes.emplace(FRNC_IN0, UnpackMode::UnpackToSrc);
+        unpack_modes(compute_hw).emplace(FRNC_IN0, UnpackMode::UnpackToSrc);
     }
 
     auto make_compute = [&](const KernelSpecName& unique_id, uint32_t num_cols_per_core_group) {
@@ -374,10 +414,21 @@ ttnn::device_operation::ProgramArtifacts FastReduceNCProgramFactory::create_prog
     }
 
     run_args.kernel_run_args = {reader_run, writer_run};
-    run_args.tensor_args.emplace(FRNC_INPUT, TensorArgument{tensor_args.input.mesh_tensor()});
-    run_args.tensor_args.emplace(FRNC_OUTPUT, TensorArgument{tensor_return_value.mesh_tensor()});
+    run_args.tensor_args = build_tensor_run_args(tensor_args, outputs);
 
     return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_args)};
+}
+
+// Only the tensor bindings carry per-dispatch state (buffer addresses); every other runtime arg derives
+// from the operation attributes and the TensorSpecs, which the program hash covers.
+tt::tt_metal::experimental::ProgramRunArgs FastReduceNCProgramFactory::override_runtime_arguments(
+    const FastReduceNCParams& /*operation_attributes*/,
+    const FastReduceNCInputs& tensor_args,
+    std::vector<Tensor>& outputs,
+    const std::optional<ttnn::MeshCoordinate>& /*mesh_dispatch_coordinate*/) {
+    ProgramRunArgs run_args;
+    run_args.tensor_args = build_tensor_run_args(tensor_args, outputs);
+    return run_args;
 }
 
 }  // namespace ttnn::experimental::prim

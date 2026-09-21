@@ -13,6 +13,8 @@ void kernel_main() {
     constexpr auto shard_factor = get_arg(args::shard_factor);
     constexpr auto num_cores_to_be_used = get_arg(args::num_cores_to_be_used);
     constexpr uint32_t outer_id_increment = shard_factor * num_cores_to_be_used;
+    [[maybe_unused]] constexpr uint32_t left_width = get_arg(args::left_width);  // zero disables splitting
+    [[maybe_unused]] constexpr uint32_t full_width = get_arg(args::full_width);
 
     // runtime args
     const auto id_range_length = get_arg(args::id_range_length);
@@ -26,6 +28,10 @@ void kernel_main() {
     uint32_t output_tile_bytes = cb_out_obj.get_entry_size();
 
     auto tensor_accessor = TensorAccessor(tensor::dst);
+#ifdef SPLIT_OUTPUT
+    // Second channel region of a split output; the tile ids below stay in full-width coordinates.
+    auto right_accessor = TensorAccessor(tensor::dst_right);
+#endif
 
     // For each shard, start at the index of the first shard to be reduced (same
     // index as output), then increment by the appropriate increment (based on
@@ -33,11 +39,30 @@ void kernel_main() {
     // factory for examples.
     for (uint32_t outer_id = start_id; outer_id < start_id + id_range_length; outer_id += outer_id_increment) {
         for (uint32_t id_offset = 0; id_offset < shard_factor; id_offset++) {
-            uint32_t i = outer_id + id_offset;
-            uint32_t write_tile_id = i;
+            const uint32_t i = outer_id + id_offset;  // output tile id in full-width coordinates
             cb_out_obj.wait_front(onetile);
-            noc.async_write(
-                cb_out_obj, tensor_accessor, output_tile_bytes, {.offset_bytes = 0}, {.page_id = write_tile_id});
+#ifdef SPLIT_OUTPUT
+            constexpr uint32_t right_width = full_width - left_width;
+            const uint32_t row = i / full_width;
+            const uint32_t col = i % full_width;
+            if (col < left_width) {
+                noc.async_write(
+                    cb_out_obj,
+                    tensor_accessor,
+                    output_tile_bytes,
+                    {.offset_bytes = 0},
+                    {.page_id = row * left_width + col});
+            } else {
+                noc.async_write(
+                    cb_out_obj,
+                    right_accessor,
+                    output_tile_bytes,
+                    {.offset_bytes = 0},
+                    {.page_id = row * right_width + col - left_width});
+            }
+#else
+            noc.async_write(cb_out_obj, tensor_accessor, output_tile_bytes, {.offset_bytes = 0}, {.page_id = i});
+#endif
             noc.async_write_barrier();
             cb_out_obj.pop_front(onetile);
         }

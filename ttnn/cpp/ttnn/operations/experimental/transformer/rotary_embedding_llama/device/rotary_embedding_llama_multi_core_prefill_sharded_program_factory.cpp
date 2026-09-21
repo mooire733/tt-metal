@@ -182,11 +182,11 @@ ttnn::device_operation::ProgramArtifacts RotaryEmbeddingLlamaMultiCorePrefillSha
         .entry_size = output_single_tile_size,
         .num_entries = num_output_tiles,
         .data_format_metadata = output_cb_data_format};
-    DataflowBufferSpec zero_dfb{
-        .unique_id = ZERO_DFB,
-        .entry_size = output_single_tile_size,
-        .num_entries = num_interm_tiles,
-        .data_format_metadata = output_cb_data_format};
+    // "zero" tail padding: writer-private, CPU-filled with zeros then read back as a NoC source.
+    // Formerly a self-loop DFB (Quasar-illegal); now a Scratchpad. size_per_node = entry_size *
+    // num_entries = output_single_tile_size * num_interm_tiles (num_interm_tiles == Wt tiles, filled
+    // once, no wrap).
+    ScratchpadSpec zero_scratch{.unique_id = ZERO_SCRATCH, .size_per_node = output_single_tile_size * num_interm_tiles};
 
     // ------------------------------------------------------------------
     // Tensor parameters. INPUT/OUTPUT always accessor-read. COS/SIN and TRANS_MAT are borrowed_from
@@ -259,11 +259,10 @@ ttnn::device_operation::ProgramArtifacts RotaryEmbeddingLlamaMultiCorePrefillSha
         .unique_id = WRITER,
         .source = kWriterSource,
         .compiler_options = {.defines = reload_define},
-        .dfb_bindings =
-            {DFBBinding{.dfb_spec_name = OUT_DFB, .accessor_name = "out", .endpoint_type = DFBEndpointType::CONSUMER},
-             DFBBinding{.dfb_spec_name = ZERO_DFB, .accessor_name = "zero", .endpoint_type = DFBEndpointType::PRODUCER},
-             DFBBinding{
-                 .dfb_spec_name = ZERO_DFB, .accessor_name = "zero", .endpoint_type = DFBEndpointType::CONSUMER}},
+        .dfb_bindings = {DFBBinding{
+            .dfb_spec_name = OUT_DFB, .accessor_name = "out", .endpoint_type = DFBEndpointType::CONSUMER}},
+        // "zero" is writer-private staging (fill + read back), so it is a Scratchpad, not a self-loop DFB.
+        .scratchpad_bindings = {ScratchpadBinding{.scratchpad_spec_name = ZERO_SCRATCH, .accessor_name = "zero"}},
         .tensor_bindings = {TensorBinding{.tensor_parameter_name = OUTPUT_PARAM, .accessor_name = "output"}},
         .compile_time_args =
             {{"n_heads", n_heads}, {"Wt", head_dim_t}, {"Ht", seq_len_t}, {"rotary_Ht", rotary_seq_len_t}},
@@ -377,15 +376,8 @@ ttnn::device_operation::ProgramArtifacts RotaryEmbeddingLlamaMultiCorePrefillSha
         .name = "rotary_embedding_llama_multi_core_prefill_sharded",
         .kernels = {reader_spec, writer_spec, compute_spec},
         .dataflow_buffers =
-            {input_dfb,
-             cos_dfb,
-             sin_dfb,
-             trans_mat_dfb,
-             rotated_interm_dfb,
-             cos_interm_dfb,
-             sin_interm_dfb,
-             out_dfb,
-             zero_dfb},
+            {input_dfb, cos_dfb, sin_dfb, trans_mat_dfb, rotated_interm_dfb, cos_interm_dfb, sin_interm_dfb, out_dfb},
+        .scratchpads = {zero_scratch},
         .tensor_parameters = {input_param, cos_param, sin_param, trans_mat_param, output_param},
         .work_units = {WorkUnitSpec{.name = "main", .kernels = {READER, WRITER, COMPUTE}, .target_nodes = all_cores}}};
 

@@ -6,6 +6,7 @@
 
 #include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
 #include <tt-metalium/experimental/metal2_host_api/dataflow_buffer_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/scratchpad_spec.hpp>
 #include <tt-metalium/experimental/metal2_host_api/tensor_parameter.hpp>
 
 // Shared Metal 2.0 named-resource vocabulary for the three rotary_embedding_llama program
@@ -19,6 +20,7 @@ namespace ttnn::experimental::prim::rope_metal2 {
 
 using tt::tt_metal::experimental::DFBSpecName;
 using tt::tt_metal::experimental::KernelSpecName;
+using tt::tt_metal::experimental::ScratchpadSpecName;
 using tt::tt_metal::experimental::TensorParamName;
 
 // Kernels
@@ -35,7 +37,12 @@ inline const DFBSpecName ROTATED_INTERM_DFB{"rotated_interm"};  // c_24
 inline const DFBSpecName COS_INTERM_DFB{"cos_interm"};          // c_25
 inline const DFBSpecName SIN_INTERM_DFB{"sin_interm"};          // c_26
 inline const DFBSpecName OUT_DFB{"out"};                        // c_16
-inline const DFBSpecName ZERO_DFB{"zero"};                      // c_27
+
+// The "zero" buffer is a writer-private staging region a DM kernel fills and reads back — a self-loop
+// DFB the port left as a fake FIFO. Quasar rejects DM self-loops, so it is a Scratchpad (issue #55526).
+// Shared by rotary_embedding_llama's writer (zero-padding tail) and deepseek_prefill's indexed writer
+// (passthrough-tile copy, accessor "copy"); both bind it single-toucher.
+inline const ScratchpadSpecName ZERO_SCRATCH{"zero"};
 
 // Tensor parameters
 inline const TensorParamName INPUT_PARAM{"input"};

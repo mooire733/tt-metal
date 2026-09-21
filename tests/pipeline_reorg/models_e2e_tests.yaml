@@ -2072,8 +2072,8 @@
     '
   model: "[tt-train] llama_8b_tp8_ddp4"
   skus:
-    bh_sc1_high_power:
-      timeout: 40
+    bh_sc1:
+      timeout: 60
       tier: 3
       release_ready: false
   owner_id: U07K00A281X # Kevin Wu
@@ -2142,8 +2142,8 @@
     '
   model: "[tt-train] llama_8b_tp4_ddp8"
   skus:
-    bh_sc1_high_power:
-      timeout: 30
+    bh_sc1:
+      timeout: 60
       tier: 3
       release_ready: false
   owner_id: U07K00A281X # Kevin Wu

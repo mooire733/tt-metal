@@ -950,10 +950,7 @@ class MiniMaxH3Pipeline:
             f"building the {config['num_layers']}-layer transformer from {self.transformer_subfolder}/, "
             f"TP={self.tp_factor}/SP={self.sp_factor}"
         )
-        # Always the precomputed-AdaLN build: every `adaln_proj` is projected on host into a table
-        # for the exact schedule and the 26 GB of projection weights (6.50 GB/device at TP=4) never
-        # reach the device. The model itself defaults to the reference projected path, which the
-        # parity test still exercises. See `models/transformers/minimax_h3/adaln_cache_minimax_h3.py`.
+
         model = MiniMaxH3Transformer3DModel(
             **config,
             mesh_device=self.mesh_device,

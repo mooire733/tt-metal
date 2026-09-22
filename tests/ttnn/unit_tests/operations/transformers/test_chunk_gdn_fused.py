@@ -81,6 +81,8 @@ def _clear_gdn_env(monkeypatch):
     monkeypatch.delenv("QWEN_GDN_UNICAST", raising=False)
     monkeypatch.delenv("QWEN_GDN_POSTED", raising=False)
     monkeypatch.delenv("QWEN_GDN_PLACEMENT", raising=False)
+    # WY-inverse method (both prims; hashed): the bit-exact Horner reference unless a test sets it.
+    monkeypatch.delenv("QWEN_GDN_TINV", raising=False)
     # Legacy selector — superseded by QWEN_GDN_PATH but still honored when PATH is unset.
     monkeypatch.delenv("QWEN_GDN_PHASED", raising=False)
     monkeypatch.delenv("QWEN_GDN_SCAN_SERIAL", raising=False)
@@ -881,3 +883,120 @@ def test_phased_selectors_agree(device, monkeypatch):
     n2 = device.num_program_cache_entries()
     assert n2 - n1 == 0, f"QWEN_GDN_PHASED=1 compiled {n2 - n1} programs after QWEN_GDN_PATH=phased (expected 0)"
     assert torch.equal(o1, o2) and torch.equal(fs1, fs2), "the two phased selectors disagree"
+
+
+# ---------------------------------------------------------------------------
+# WY-inverse methods (QWEN_GDN_TINV = horner | sfpu_bf16 | sfpu_fp32). The SFPU forward-substitution
+# solve changes the arithmetic of T_inv (PCC-class against the Horner reference), but the phased prep
+# and the fused producer compile the same body for a given method, so fused == phased stays bit-exact
+# for every method. The solver's own accuracy is tested on the prep prim (test_chunk_gdn_prims.py).
+# ---------------------------------------------------------------------------
+
+_SFPU_TINV = ["sfpu_bf16", "sfpu_fp32"]
+
+
+@pytest.mark.parametrize("method", _SFPU_TINV)
+@pytest.mark.parametrize(
+    "hk, hv, nv, np_producers, nc, placement",
+    [
+        (4, 12, 2, 7, 64, 1),  # BH=12 (27B TP-4) at the model's geometry, T=2048
+        (4, 12, 4, 5, 16, 1),  # NV=4 receivers (Vtl=1)
+        (4, 12, 2, 3, 8, 0),  # row-major placement
+        (16, 48, 1, 1, 8, 1),  # BH=48 (single-device shape), one producer per head
+        (1, 4, 4, 7, 16, 1),  # BH=4
+    ],
+    ids=lambda v: str(v),
+)
+def test_fused_tinv_bit_exact_vs_phased(device, monkeypatch, method, hk, hv, nv, np_producers, nc, placement):
+    """fused == phased, bit for bit, with the SFPU WY-inverse on both paths."""
+    _skip_unless_geometry_fits(device, hv, nv, np_producers, nc, placement=placement)
+    (o_ph, fs_ph), (o_fu, fs_fu), delta, _ = _fused_vs_phased(
+        device,
+        monkeypatch,
+        hk,
+        hv,
+        nc,
+        nv,
+        np_producers,
+        20261001 + hv,
+        env={"QWEN_GDN_TINV": method, "QWEN_GDN_PLACEMENT": placement},
+    )
+    assert delta == 1, f"{method}: fused compiled {delta} new programs (expected 1)"
+    bad = _vblock_mismatches(o_ph, o_fu, hv, nv)
+    assert not bad, f"{method} BH={hv} NV={nv} NP={np_producers}: o differs in (head, vblock) slices {bad}"
+    assert torch.equal(o_fu, o_ph) and torch.equal(fs_fu, fs_ph), f"{method}: fused differs from phased"
+
+
+@pytest.mark.parametrize("method", _SFPU_TINV)
+def test_fused_tinv_vs_horner(device, monkeypatch, method):
+    """End to end at the 27B TP-4 shape (BH=12, T=2048, the model's default fused geometry): the SFPU
+    WY-inverse against the Horner reference, and against the torch golden. The T_inv difference is
+    ~1e-3 (prims test); across the 64-chunk recurrence it must stay PCC-class."""
+    hk, hv, nc = 4, 12, 64
+    _clear_gdn_env(monkeypatch)
+    host, tensors, s0 = _make_inputs(device, 1, nc * CHUNK, hk, hv, True, seed=20261002)
+    const_tiles = _const_tiles(device)
+    monkeypatch.setenv("QWEN_GDN_PATH", "fused")
+    o_h, fs_h = _run_op(device, tensors, const_tiles, s0)
+    monkeypatch.setenv("QWEN_GDN_TINV", method)
+    o_s, fs_s = _run_op(device, tensors, const_tiles, s0)
+    assert not torch.equal(o_s, o_h), f"{method}: output identical to Horner — the SFPU solve did not run"
+    q, k, v, g, beta, s0_host = host
+    o_ref, fs_ref = _golden_chunk_gdn(q.float(), k.float(), v.float(), g, beta, KDIM**-0.5, s0_host, CHUNK)
+    for name, got, horner, ref in (("o", o_s, o_h, o_ref), ("final_state", fs_s, fs_h, fs_ref)):
+        pcc_h = _pcc(horner.float(), got.float())
+        assert pcc_h >= 0.99999, f"{method}: {name} PCC vs Horner {pcc_h} < 0.99999"
+        pcc_ref, pcc_ref_h = _pcc(ref, got.float()), _pcc(ref, horner.float())
+        assert pcc_ref >= 0.999, f"{method}: {name} PCC vs torch golden {pcc_ref} < 0.999"
+        # no worse than the Horner reference against the golden, beyond PCC noise
+        assert pcc_ref >= pcc_ref_h - 1e-5, f"{method}: {name} PCC vs golden {pcc_ref} < Horner's {pcc_ref_h}"
+
+
+def test_fused_tinv_cache_identity(device, monkeypatch):
+    """N1 for QWEN_GDN_TINV on both prims: each method compiles its own fused program and its own phased
+    prep program (the scan is unchanged, so phased compiles exactly one), revisits are cache hits."""
+    hk, hv = NP_BH_KV_HEADS
+    _clear_gdn_env(monkeypatch)
+    _, tensors, s0 = _make_inputs(device, 1, T_SMALL, hk, hv, True, seed=20261003)
+    const_tiles = _const_tiles(device)
+    for path in ("fused", "phased"):
+        monkeypatch.setenv("QWEN_GDN_PATH", path)
+        monkeypatch.delenv("QWEN_GDN_TINV", raising=False)
+        _run_op(device, tensors, const_tiles, s0)
+        n = device.num_program_cache_entries()
+        for method in ("sfpu_bf16", "sfpu_fp32"):
+            monkeypatch.setenv("QWEN_GDN_TINV", method)
+            _run_op(device, tensors, const_tiles, s0)
+            n2 = device.num_program_cache_entries()
+            assert n2 - n == 1, f"{path}: horner->{method} compiled {n2 - n} programs (expected 1: tinv must be hashed)"
+            n = n2
+        for method in ("horner", "sfpu_bf16", "sfpu_fp32"):
+            monkeypatch.setenv("QWEN_GDN_TINV", method)
+            _run_op(device, tensors, const_tiles, s0)
+        assert device.num_program_cache_entries() == n, f"{path}: revisiting the methods compiled new programs"
+
+
+def test_fused_tinv_rejects_chunk64(device, monkeypatch, expect_error):
+    """The SFPU solve is a single-tile (chunk_size == 32) routine: at chunk_size 64 the op must refuse it,
+    not fall back to Horner silently (which would make any A/B vacuous)."""
+    _clear_gdn_env(monkeypatch)
+    monkeypatch.setenv("QWEN_GDN_PATH", "phased")
+    monkeypatch.setenv("QWEN_GDN_TINV", "sfpu_fp32")
+    _, tensors, s0 = _make_inputs(device, 1, 256, 4, 12, True, seed=20261004)
+    q, k, v, g, beta = tensors
+    eye, tril, ones, masks = _const_tiles(device, chunk_size=64)
+    with expect_error(RuntimeError, "needs chunk_size == 32"):
+        ttnn.transformer.chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=s0,
+            output_final_state=True,
+            chunk_size=64,
+            eye=eye,
+            tril=tril,
+            ones=ones,
+            masks=masks,
+        )

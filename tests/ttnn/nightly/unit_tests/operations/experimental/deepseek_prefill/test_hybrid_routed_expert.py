@@ -22,6 +22,11 @@ The clamped SiLU-GLU cases from the reference have no counterpart here: the fuse
 Silu, SituGlu and SwiGluOai, so a clamped activation would leave every below-threshold expert
 unserved and the op rejects it outright.
 
+Kimi K3 appears here although it does not ship the hybrid split: its cases use the measured
+crossover its config keeps under ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD_MEASURED, so the op is graded
+on K3's LatentMoE shape without claiming the model dispatches it. See
+test_hybrid_routed_expert_model_multi_expert.
+
 CI runs the row-major cases, which is the layout production feeds the op; the tile-layout
 variants are pruned per test with ci_pruning.tiled_x_input, exactly as the reference file does.
 """
@@ -574,6 +579,13 @@ def test_hybrid_routed_expert_model_multi_expert(
     never produces, the buffer holds tens of thousands of rows the way the model's does, and both
     halves own several experts inside one dispatch. Counts are logged per pass; a failure names the
     seed that reproduces it.
+
+    Kimi K3 does not ship the hybrid split. Its config keeps the measured fused-versus-unified
+    crossover, 128 tokens on the 3584x3072 shape, under ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD_MEASURED;
+    only Kimi K2.6/K2.7 and GLM 5.1/5.2 dispatch both routed-expert ops today, and in the shipped
+    model every K3 expert takes the unified op. The K3 case here grades the union op on K3's shape at
+    that measured crossover -- both halves, the barrier between them, and the arena overlay at the
+    LatentMoE width -- not whether the model dispatches it.
     """
     experts_per_chip = config.NUM_ROUTED_EXPERTS // _GALAXY_CHIPS
     buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, experts_per_chip)

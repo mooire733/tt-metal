@@ -133,7 +133,7 @@ safe-outputs:
       - galaxy-unit-tests
       - models-t1-device-perf-tests
       - galaxy-integration-tests
-      - galaxy-stress-tests
+      - stress-tests
       - galaxy-e2e-tests
       - galaxy-sanity
       - galaxy-health

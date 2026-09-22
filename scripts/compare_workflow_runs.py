@@ -458,7 +458,7 @@ def main():
         "galaxy-multi-user-isolation-tests.yaml",
         "galaxy-profiler-tests.yaml",
         "galaxy-sanity.yaml",
-        "galaxy-stress-tests.yaml",
+        "stress-tests.yaml",
         "galaxy-unit-tests.yaml",
         # Blackhole
         "blackhole-demo-tests.yaml",

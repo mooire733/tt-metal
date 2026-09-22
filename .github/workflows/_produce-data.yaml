@@ -73,7 +73,7 @@ on:
       - "(Galaxy) perf tests"
       - "(Galaxy) e2e tests"
       - "(Galaxy) profiler tests"
-      - "(Galaxy) Stress"
+      - "Stress tests"
       - "(Galaxy) unit tests"
       - "(Galaxy) Sanity"
       - "(Galaxy) Health"

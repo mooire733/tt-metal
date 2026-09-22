@@ -68,7 +68,7 @@ jobs:
               ".github/workflows/galaxy-unit-tests.yaml",
               ".github/workflows/models-t1-device-perf-tests.yaml",
               ".github/workflows/galaxy-integration-tests.yaml",
-              ".github/workflows/galaxy-stress-tests.yaml",
+              ".github/workflows/stress-tests.yaml",
               ".github/workflows/galaxy-e2e-tests.yaml",
               ".github/workflows/galaxy-sanity.yaml",
               ".github/workflows/galaxy-health.yaml",

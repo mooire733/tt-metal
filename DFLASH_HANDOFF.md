@@ -1,5 +1,113 @@
 # DFlash speculative decoding on Qwen3.6-27B (T3K) — handoff
 
+## START HERE — bringing this up on a new machine (written 2026-09-22)
+
+Everything below this section is chronological findings. This section is the only thing you need to
+read before running something.
+
+### Where it stands, measured
+
+Branch `ign/qwen_3.6_27B_dFLASH`. The demo is the ONLY thing running the shipping configuration; the
+`tests/` numbers are not comparable to it (see "Traps" below).
+
+| | tok/s | acceptance | vs production 17.87 |
+|---|---|---|---|
+| `spec_128` (128 prompt + 100 new, no crossing) | **17.42** | 4.950 | 0.97x |
+| `spec_128_long` (128 + 256, one crossing) | **13.12** | 4.554 | 0.73x |
+| Qwen3.8-27B plain decode, no DFlash | 17.02 | — | its own baseline |
+| Qwen3.8-27B + the 3.6 drafter, `spec_128` | 27.53 | 7.615 | 1.62x of 17.02 |
+
+DFlash is at PARITY, not a win, on Qwen3.6. Do not quote a speedup without saying which prompt and
+whether thinking was on — acceptance swings 3.09 to 7.62 across ordinary prompts and that is the
+whole story (see the "ACCEPTANCE TRACKS HOW FORMULAIC THE TEXT IS" section).
+
+### Bring-up, in order
+
+```bash
+cd <checkout>
+source python_env/bin/activate
+export TT_METAL_HOME=$(pwd) PYTHONPATH="$(pwd)"
+
+export DFLASH_RUN_TARGET=1                         # without this every DFlash test SKIPS
+export MESH_DEVICE=T3K
+export HF_MODEL=Qwen/Qwen3.6-27B
+export DFLASH_HF_MODEL=z-lab/Qwen3.6-27B-DFlash    # 1.73B drafter; there is no 3.8 drafter
+export TT_CACHE_PATH=$HOME/.cache/tt_cache/Qwen3.6-27B
+```
+
+Weights (~52 GB) come from HuggingFace on first use. `TT_CACHE_PATH` is built on the first run
+(~23 GB) and is keyed by `<MESH_DEVICE>/tensor_cache_bfp8_mesh<shape>`: **copyable to another T3K,
+must be rebuilt for a different device**. Neither cold cost is a hang.
+
+**First command to run — this is the reference, and it takes ~6.5 min:**
+
+```bash
+pytest -svq --timeout=0 models/demos/blackhole/qwen36/demo/dflash_demo.py
+```
+
+Expect the table above. If `spec_128` is not ~17.4 tok/s at acceptance 4.950, stop and find out why
+before believing anything else.
+
+### Traps that cost real time here
+
+* **`--timeout=0` on a cold cache.** `pytest.ini` sets `timeout = 300`; a first 27B load exceeds it
+  and the run "fails" on a timeout that is not a defect.
+* **`-k spec_128` matches `spec_128_long` too**, and `-k traced_128` matches `traced_128k` (a
+  128k-context run). Use `-k "spec_128 and not long"`.
+* **This is a SHARED box.** Check before every run:
+  `ps -eo pid,user,etime,cmd | grep tt-metal/python_env | grep -v grep`
+* **An ETH-heartbeat timeout at topology discovery is USUALLY CONTENTION, not a wedge.** If anything
+  is listed above, wait — do NOT `tt-smi -r`, it destroys their work. Only reset when nothing holds
+  the device and the error persists. The ASIC ID in the message is whichever chip reported, not a
+  faulty part.
+* **After any job exits, wait ~45 s before starting the next.** Hugepages and device handles release
+  after the process is reaped; starting immediately gives
+  `Failed to pin pages for hugepage ... Cannot allocate memory`. Idle steady state is
+  `free_hugepages = 8` of 16 — 8 are held permanently by `/dev/hugepages-1G/device_*`, so never wait
+  for 16.
+* **Never `kill -9` a run that has a trace parked** — that is what wedges the ethernet cores. SIGTERM
+  and give it 60 s.
+
+### The tests do NOT match the demo
+
+Only `tests/perf/test_dflash_anchor_size_ab.py` and `tests/reference/test_dflash_anchor_crossing.py`
+use the shipping config. These three call `enable_traced_verify()` bare, so they run the WIDE LM head
+and pin `ANCHOR=128`, landing ~15 % low and not comparable to the demo:
+`test_dflash_traced_throughput.py`, `test_dflash_prose_throughput.py`, `test_dflash_acceptance_curve.py`.
+`test_dflash_throughput.py` never traces the verify at all — it is a within-run RATIO test whose
+absolute numbers are 1-2 tok/s by design and whose own docstring says only ratios are trustworthy.
+
+Bringing those three in line is unfinished work; it will move their recorded baselines.
+
+### What is worth doing next, ranked
+
+1. **`TtTarget.anchor_for()`'s cap of 256 is length-dependent, not a constant.** At 261 tokens the
+   smallest fitting bucket is 320 and beats the cap by **21 %**; at 384 tokens widening gains
+   nothing. The cost model that decides it is in the anchor-sizing section — widening by N rows to
+   avoid C crossings pays while `steps < 4000*C / (0.25*N)`. Small change to an existing function.
+2. **The ~134 ms fixed verify floor.** Fitting the measured widths gives
+   `verify ≈ 166 + 0.25 * (rows - 128)` ms, so ~80 % of the verify does not depend on how many rows
+   it verifies (25 % collectives, 17.6 % layout churn, across 64 layers). This caps everything else
+   and is module-perf work, not speculative-decoding work.
+3. **Acceptance**, which moves 1.8x across prompts where the best step-time work of two sessions
+   moved throughput 1.17 -> 1.32x. That is drafter quality, not engineering.
+
+Do NOT spend time on: removing the re-capture (five routes closed, listed below), porting DFlash2
+(its kernel is Blackhole-only — 30 of 31 op tests fail on Wormhole), or tracing the drafter (its
+value depends on `ctx_capacity`: 0.85x at 512, +2.3 % at 128, -1.5 % at the demo's 288).
+
+### Commits from this work
+
+```
+cb3d3bb87a3  demo: trace past the anchor by default   spec_128_long 7.77 -> 13.12
+186f3f4c86d  size the anchor to the request           spec_128 reaches 0.96x
+f6cae21dfea  crossing test was measuring the wide head
+be3dd75e17a  staged-input cache                       1.17x -> 1.32x
+32e98ba5855  the anchor re-capture was corrupting its own inputs   3.348 -> 4.529
+```
+
+---
+
 **Branch:** `ign/qwen_3.6_27B_dFLASH` · **Last commit at handoff:** `ad60b404d4a`
 
 You are picking this up on a fresh machine. Read §1–§3, then go to §5. §7 and §8 exist so you
@@ -912,8 +1020,9 @@ committed per target forward) is therefore the entire speedup story.
 |---|---|
 | Production traced decode (the baseline that matters) | **17.87 tok/s** (text_demo.py, `traced_128`, ISL 128) |
 | DFlash at start of this work | 18.82 tok/s |
-| DFlash now | **22.40 tok/s** ≈ **1.25×** production |
-| Acceptance on `"The capital of France is"` | **7.000** |
+| DFlash when the row below was written (2026-09-15, stale) | 22.40 tok/s |
+| **DFlash now (2026-09-22, demo `spec_128`)** | **17.42 tok/s ≈ 0.97x** — see START HERE |
+| Acceptance on `"The capital of France is"`, 64 tokens | 7.000 then, **4.200** on Qwen3.8 now — it is prompt- and model-dependent |
 | Acceptance on ordinary prose | **~2.0–2.3** ⚠️ |
 
 **Two things are open, and the second one is more important than the first:**
@@ -958,8 +1067,10 @@ costs** and neither is a hang:
 pytest -svq models/demos/blackhole/qwen36/tests/reference/test_dflash_traced_throughput.py
 ```
 
-This is the known-good reference. It should report acceptance **7.000** and ~22 tok/s. If it does
-not, your environment is wrong and nothing below will mean anything.
+STALE AS WRITTEN (2026-09-22). That test runs the WIDE LM head and pins ANCHOR=128, so it is no
+longer the configuration anything ships, and its 7.000 / ~22 tok/s came from a 5-token prompt whose
+continuation happened to be highly predictable. Use the demo as the reference instead — see
+START HERE at the top of this file.
 
 ---
 
@@ -1209,7 +1320,7 @@ contaminate any A/B that reuses a drafter, which is most of the tests here.
 
 | Path | What |
 |---|---|
-| `tests/reference/test_dflash_traced_throughput.py` | **the known-good reference.** 7.000 / ~22 tok/s |
+| `tests/reference/test_dflash_traced_throughput.py` | was the reference; STALE — wide head, ANCHOR=128, not comparable to the demo |
 | `tests/unit/test_dflash_hang_repro.py` | the bisection for §4 |
 | `tests/reference/test_dflash_prompt_length.py` | acceptance vs prompt length (`DFLASH_PROBE_PROMPT_LEN=1`) |
 | `tests/reference/test_dflash_prose_throughput.py` | ⚠️ control is broken; do not quote |

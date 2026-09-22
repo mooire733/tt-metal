@@ -25,6 +25,9 @@ unserved and the op rejects it outright.
 The op is not wired into any model; nothing here should run in CI.
 """
 
+import math
+import random
+
 import pytest
 import torch
 from loguru import logger
@@ -32,6 +35,8 @@ from loguru import logger
 import ttnn
 from models.common.utility_functions import is_blackhole
 from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
+from models.demos.deepseek_v3_d_p.reference.glm_5_2_config import GLM52Config
+from models.demos.deepseek_v3_d_p.reference.kimi_k2_7_config import KimiK27Config
 from models.demos.deepseek_v3_d_p.reference.kimi_k3_config import KimiK3Config
 from models.demos.deepseek_v3_d_p.reference.tt.moe.expert import ACTIVATION_SITU, TorchExpert
 from models.demos.deepseek_v3_d_p.tt.moe.tt_routed_expert import TtRoutedExpert
@@ -351,32 +356,80 @@ def _tile_aligned_region_offsets(counts: list[int]) -> list[int]:
     return offsets
 
 
-@pytest.mark.parametrize("x_row_major", [True, False], ids=["x_rm", "x_tile"])
-@pytest.mark.skipif(not is_blackhole(), reason="the routed expert is Blackhole-only")
-def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
-    """Several experts with DISTINCT weights, split across both halves, graded per expert region.
+def _random_expert_counts(
+    seed: int, experts_per_chip: int, max_per_expert: int, threshold: int, buffer_rows: int
+) -> list[int]:
+    """Random active-token count per local expert, the way a chip sees them in the model: anything
+    from empty to the per-expert maximum, not tile-aligned, and fitting the dispatch buffer once
+    tile-rounded. Seeded, so a failing draw reproduces.
 
-    Every other correctness case runs one expert, so nothing checks that each half writes the
-    right rows for the right expert: a swapped region offset, a stale per-expert weight address
-    or cross-expert CB state would all still pass them. Runs twice on different buffers, because
-    the per-expert weight addresses are re-patched on a program-cache hit and a wrong slot there
-    only shows on the second call.
+    Log-uniform, not uniform. Expert load is heavy-tailed -- most experts see a few hundred tokens
+    and a few see thousands -- and the hybrid threshold sits at a few percent of the per-expert
+    maximum, so a uniform draw would hand the fused half one expert in twenty. Equal weight per
+    octave spans the whole range while landing roughly two thirds of the experts at or below the
+    threshold, which is the split the union was built for.
+
+    Two nudges keep every draw a useful case. One expert is forced empty -- a zero-row region is
+    the one shape the fixed-count case never has, and combine and the op both have to step over it.
+    And if a draw happens to hand the unified half no expert at all, the largest count is redrawn
+    above the threshold; the forced-empty expert already guarantees the fused half one.
+    """
+    rng = random.Random(seed)
+    log_span = math.log(max_per_expert + 1)
+    counts = [int(math.exp(rng.uniform(0.0, log_span))) - 1 for _ in range(experts_per_chip)]
+    counts[rng.randrange(experts_per_chip)] = 0
+    # Fit the tile-rounded sum into the buffer, leaving a tile per expert for the rounding itself.
+    # Scale rather than clip, so the shape of the draw survives.
+    fit = buffer_rows - ttnn.TILE_SIZE * experts_per_chip
+    aligned = sum(-(-c // ttnn.TILE_SIZE) * ttnn.TILE_SIZE for c in counts)
+    if aligned > fit:
+        counts = [c * fit // aligned for c in counts]
+    if not any(c > threshold for c in counts):
+        counts[counts.index(max(counts))] = rng.randint(threshold + 1, max_per_expert)
+    assert all(0 <= c <= max_per_expert for c in counts)
+    offsets = _tile_aligned_region_offsets(counts)
+    assert offsets[-1] + counts[-1] <= buffer_rows
+    return counts
+
+
+def _run_multi_expert(
+    device,
+    *,
+    emb_dim: int,
+    hidden_dim: int,
+    activation,
+    threshold: int,
+    x_row_major: bool,
+    passes: list[tuple[int, list[int]]],
+):
+    """Several experts with DISTINCT weights inside ONE dispatch, graded per expert region against
+    TorchExpert. One pass per (seed, counts) entry, each on fresh weights and a fresh buffer: the
+    per-expert weight addresses are re-patched on a program-cache hit, and a wrong slot there only
+    shows from the second call on.
 
     The buffer is sized and laid out as dispatch does it in the model: capacity-factor times the
-    per-expert maximum plus the alignment reserve, with each region at a tile-aligned offset. The
+    per-expert maximum plus the alignment reserve, each region at a tile-aligned offset. The
     per-expert maximum handed to the op stays _ISL_ALLOCATED_TOKENS, as in the single-expert cases.
+    Only the rows inside each region are graded; the op may write whole tiles, so the padding rows
+    between regions are its own.
     """
-    emb_dim, hidden_dim = DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE
-    counts = _MULTI_EXPERT_COUNTS
-    offsets = _tile_aligned_region_offsets(counts)
-    buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, len(counts))
-    assert all(c <= _ISL_ALLOCATED_TOKENS for c in counts), "no expert may exceed the per-expert maximum"
-    assert offsets[-1] + counts[-1] <= buffer_rows
-    assert any(c <= _THRESHOLD for c in counts) and any(
-        c > _THRESHOLD for c in counts
-    ), "the point of this case is that both halves run; counts must straddle the threshold"
+    experts_per_chip = len(passes[0][1])
+    assert all(len(counts) == experts_per_chip for _, counts in passes)
+    buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, experts_per_chip)
+    torch_activation = _TORCH_ACTIVATION[activation]
 
-    def one_pass(seed: int):
+    for seed, counts in passes:
+        offsets = _tile_aligned_region_offsets(counts)
+        assert all(0 <= c <= _ISL_ALLOCATED_TOKENS for c in counts), "no expert may exceed the per-expert maximum"
+        assert offsets[-1] + counts[-1] <= buffer_rows
+        assert any(c <= threshold for c in counts) and any(
+            c > threshold for c in counts
+        ), "the point of this case is that both halves run; counts must straddle the threshold"
+        logger.info(
+            f"multi-expert pass seed={seed}: {experts_per_chip} experts, {sum(counts)} live rows in a "
+            f"{buffer_rows}-row buffer, counts={counts}"
+        )
+
         torch.manual_seed(seed)
         weights = [
             {
@@ -390,10 +443,10 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
         for off, cnt in zip(offsets, counts):
             torch_input[off : off + cnt] = torch.randn(cnt, emb_dim, dtype=torch.float32)
 
-        idx_tt = _idx_tensor(device, list(range(len(counts))))
+        idx_tt = _idx_tensor(device, list(range(experts_per_chip)))
         tt_expert = TtRoutedExpert(
             mesh_device=device,
-            experts_per_chip=len(counts),
+            experts_per_chip=experts_per_chip,
             global_expert_idx_table=idx_tt,
             emb_dim=emb_dim,
             hidden_dim=hidden_dim,
@@ -401,7 +454,7 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
             torch_weights=weights,
             activations_dtype=ttnn.bfloat8_b,
             weights_dtype=ttnn.bfloat4_b,
-            activation=ttnn.RoutedExpertActivation.Silu,
+            activation=activation,
         )
         tt_input = ttnn.from_torch(
             torch_input,
@@ -419,25 +472,124 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
             tt_expert.up_projs,
             tt_expert.down_projs,
             max_dispatched_tokens_per_expert=_ISL_ALLOCATED_TOKENS,
-            hybrid_token_threshold=_THRESHOLD,
+            hybrid_token_threshold=threshold,
             compute_kernel_config=tt_expert.compute_kernel_config,
-            activation=ttnn.RoutedExpertActivation.Silu,
+            activation=activation,
         )
         got = ttnn.to_torch(tt_output, mesh_composer=ttnn.ConcatMeshToTensor(device, dim=0))
 
         for e, (off, cnt) in enumerate(zip(offsets, counts)):
+            half = "fused" if cnt <= threshold else "unified"
+            if cnt == 0:
+                logger.debug(f"expert {e} (0 rows, {half} half): empty region, nothing to grade")
+                continue
             rows = torch_input[off : off + cnt]
             with torch.no_grad():
                 want = TorchExpert(
-                    emb_dim, hidden_dim, weights[e], activation=_TORCH_ACTIVATION[ttnn.RoutedExpertActivation.Silu]
+                    emb_dim,
+                    hidden_dim,
+                    weights[e],
+                    activation=torch_activation,
+                    situ_beta=_SITU_BETA_GATE,
+                    situ_linear_beta=_SITU_BETA_UP,
                 )(rows)
-            half = "fused" if cnt <= _THRESHOLD else "unified"
             _, pcc = comp_pcc(want, got[off : off + cnt])
             logger.debug(f"expert {e} ({cnt} rows, {half} half): PCC {pcc:.6f}")
             assert pcc >= 0.97, f"expert {e} ({half} half, rows {off}..{off + cnt}) PCC {pcc:.6f}"
+            assert not torch.isnan(got[off : off + cnt]).any(), f"expert {e}: NaN in output"
 
-    one_pass(seed=42)
-    one_pass(seed=7)  # different buffers: grades the cache-hit re-patch of per-expert addresses
+
+@pytest.mark.parametrize("x_row_major", [True, False], ids=["x_rm", "x_tile"])
+@pytest.mark.skipif(not is_blackhole(), reason="the routed expert is Blackhole-only")
+def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
+    """Four experts at fixed, tile-aligned counts straddling the threshold, on DeepSeek V3's shape.
+
+    Every single-expert case leaves one thing unchecked: that each half writes the right rows for
+    the right expert. A swapped region offset, a stale per-expert weight address or cross-expert
+    CB state would all still pass them. This is the small, fixed-shape version of that check; the
+    model-shaped random version is test_hybrid_routed_expert_model_multi_expert.
+    """
+    _run_multi_expert(
+        device,
+        emb_dim=DeepSeekV3Config.EMB_SIZE,
+        hidden_dim=DeepSeekV3Config.MOE_INTERMEDIATE_SIZE,
+        activation=ttnn.RoutedExpertActivation.Silu,
+        threshold=_THRESHOLD,
+        x_row_major=x_row_major,
+        # Same counts both passes: different weights and buffers are what grade the cache-hit re-patch.
+        passes=[(42, _MULTI_EXPERT_COUNTS), (7, _MULTI_EXPERT_COUNTS)],
+    )
+
+
+# The 8x4 Galaxy every one of these models ships on: NUM_ROUTED_EXPERTS over 32 chips is the
+# expert count a chip's routed-expert op really carries.
+_GALAXY_CHIPS = 32
+
+# (model, config, K axis, hidden, activation, hybrid threshold). K3's routed experts run at the
+# LatentMoE width, not EMB_SIZE, and K3 does not ship the hybrid split today -- its config keeps the
+# measured crossover under _MEASURED -- so this grades the op on K3's shape at that crossover, not
+# whether the model dispatches it.
+_MODEL_MULTI_EXPERT_CASES = [
+    pytest.param(
+        "glm_5_2",
+        GLM52Config,
+        GLM52Config.EMB_SIZE,
+        GLM52Config.MOE_INTERMEDIATE_SIZE,
+        ttnn.RoutedExpertActivation.Silu,
+        GLM52Config.ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD,
+        id="glm_5_2",
+    ),
+    pytest.param(
+        "kimi_k2_7",
+        KimiK27Config,
+        KimiK27Config.EMB_SIZE,
+        KimiK27Config.MOE_INTERMEDIATE_SIZE,
+        ttnn.RoutedExpertActivation.Silu,
+        KimiK27Config.ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD,
+        id="kimi_k2_7",
+    ),
+    pytest.param(
+        "kimi_k3",
+        KimiK3Config,
+        KimiK3Config.ROUTED_EXPERT_HIDDEN_SIZE,
+        KimiK3Config.MOE_INTERMEDIATE_SIZE,
+        ttnn.RoutedExpertActivation.SituGlu,
+        KimiK3Config.ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD_MEASURED,
+        id="kimi_k3",
+    ),
+]
+
+
+@pytest.mark.uncollect_if(pred=ci_pruning.tiled_x_input)
+@pytest.mark.parametrize("model_name, config, emb_dim, hidden_dim, activation, threshold", _MODEL_MULTI_EXPERT_CASES)
+@pytest.mark.parametrize("x_row_major", [True, False], ids=["x_rm", "x_tile"])
+@pytest.mark.skipif(not is_blackhole(), reason="the routed expert is Blackhole-only")
+def test_hybrid_routed_expert_model_multi_expert(
+    device, model_name: str, config, emb_dim: int, hidden_dim: int, activation, threshold: int, x_row_major: bool
+):
+    """A chip's full complement of experts at each model's real shape, with random counts.
+
+    Each pass draws a fresh random count per expert -- empty to the per-expert maximum, not
+    tile-aligned, one expert always empty -- so the regions land at offsets the fixed-count case
+    never produces, the buffer holds tens of thousands of rows the way the model's does, and both
+    halves own several experts inside one dispatch. Counts are logged per pass; a failure names the
+    seed that reproduces it.
+    """
+    experts_per_chip = config.NUM_ROUTED_EXPERTS // _GALAXY_CHIPS
+    buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, experts_per_chip)
+    passes = [
+        (seed, _random_expert_counts(seed, experts_per_chip, _ISL_ALLOCATED_TOKENS, threshold, buffer_rows))
+        for seed in (42, 7)
+    ]
+    _run_multi_expert(
+        device,
+        emb_dim=emb_dim,
+        hidden_dim=hidden_dim,
+        activation=activation,
+        threshold=threshold,
+        x_row_major=x_row_major,
+        passes=passes,
+    )
 
 
 # Every model that measured a crossover runs 256 routed experts over 8 chips.

@@ -34,14 +34,28 @@ enum class SemScope : uint8_t {
 };
 
 /**
- * @brief Per-binding token for a semaphore, emitted into the generated kernel header.
+ * @brief Per-binding token for a semaphore, emitted into the generated kernel header as a
+ *        constexpr object: `constexpr SemaphoreBindingToken name{id, scope};`.
  *
  * Carries everything the host resolved for this binding: the semaphore id and the mechanism
- * its accesses must use. A Semaphore is constructed from the token, which is how the
- * mechanism reaches the kernel as a compile-time property.
+ * its accesses must use. Construct a Semaphore from it, `Semaphore s(sem::name);`. The token
+ * is a compile-time constant, so the mechanism folds away once the constructor is inlined.
  */
-template <std::uint32_t SEM_ID, SemScope SEM_SCOPE>
 struct SemaphoreBindingToken {
-    static constexpr std::uint32_t id = SEM_ID;
-    static constexpr SemScope scope = SEM_SCOPE;
+    std::uint32_t id;
+    SemScope scope;
 };
+
+namespace sem_internal {
+
+/**
+ * @brief One DM_LOCAL_CACHED binding on this node, as the generated header lists them for the
+ *        firmware's pool entry/exit (sem_internal::init_dm_local_cached in noc_semaphore.h):
+ *        the semaphore id and how many binder harts on this node take part.
+ */
+struct CachedSemaphore {
+    std::uint32_t id;
+    std::uint32_t binder_harts;
+};
+
+}  // namespace sem_internal

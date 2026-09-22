@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "chunk_gdn_fused.hpp"
+#include "chunk_gdn_phased.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -66,6 +67,7 @@ void ChunkGdnFusedOperation::validate_on_program_cache_miss(
     // Geometry: NP producers + NV receivers per head. Receivers of a head form a 1xNV row rectangle
     // (the multicast target), so the grid must hold BH such rectangles: BH <= (grid.x / NV) * grid.y.
     // Producers have no placement constraint. NP=1 / NV=1 unless QWEN_GDN_NP / QWEN_GDN_NV opted in.
+    validate_gdn_tinv(attrs.tinv, attrs.chunk_size, in.q);
     TT_FATAL(attrs.np >= 1, "chunk_gdn_fused: np must be >= 1 (got {})", attrs.np);
     TT_FATAL(attrs.nv >= 1, "chunk_gdn_fused: nv must be >= 1 (got {})", attrs.nv);
     const uint32_t Vt = attrs.val_dim / TILE_WIDTH;
@@ -401,6 +403,10 @@ std::vector<Tensor> chunk_gdn_fused(
         nv_env = static_cast<uint32_t>(v_nv);
     }
     // The model fills whatever the knobs leave free (both, one, or none) so the pair fits the grid.
+    // The geometry is chosen with the Horner-calibrated model whatever the WY-inverse method: the SFPU
+    // solve removes producer compute but not the producer's DRAM/NoC time, so its gain shrinks as more
+    // producers load the NoC, and a single scale factor on w_p picked measurably slower geometries.
+    const uint32_t tinv = gdn_tinv_from_env();
     const auto choice = choose_fused_geometry(grid0.x, grid0.y, BH, num_chunks, val_dim / TILE_WIDTH, nv_env, np_env);
     TT_FATAL(
         choice.nv >= 1,
@@ -457,6 +463,7 @@ std::vector<Tensor> chunk_gdn_fused(
         .unicast = unicast,
         .posted = posted,
         .placement = placement,
+        .tinv = tinv,
         .has_initial_state = initial_state.has_value(),
         .output_final_state = output_final_state,
         .output_mem_config = output_mem_config,

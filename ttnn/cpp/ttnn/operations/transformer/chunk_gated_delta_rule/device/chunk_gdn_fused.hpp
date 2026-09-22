@@ -72,6 +72,9 @@ struct ChunkGdnFusedParams {
     // then -y, so a head's hand-off traffic never leaves its own row (or column block) and heads do not
     // share NoC links (v0.3 §10b). Read from QWEN_GDN_PLACEMENT at attrs construction (hashed).
     uint32_t placement = 0;
+    // WY-inverse method of the producer's prep compute (GdnTinv, chunk_gdn_phased.hpp). Read from
+    // QWEN_GDN_TINV at attrs construction (hashed), exactly as the phased prep prim reads it.
+    uint32_t tinv = 0;
     bool has_initial_state = false;
     bool output_final_state = false;
     tt::tt_metal::MemoryConfig output_mem_config;

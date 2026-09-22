@@ -316,6 +316,9 @@ tt::tt_metal::ProgramDescriptor ChunkGdnPrepProgramFactory::create_descriptor(
     compute_ct.push_back(f32_bits(attrs.scale));
     compute_ct.push_back(f32_bits(1e-6f));
     compute.compile_time_args = compute_ct;
+    if (attrs.tinv != static_cast<uint32_t>(GdnTinv::HORNER)) {
+        compute.defines.emplace_back("GDN_TINV_SFPU", std::to_string(attrs.tinv));
+    }
     compute.config = compute_cfg();
     compute.runtime_args.reserve(n_used);
 

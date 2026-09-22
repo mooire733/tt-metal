@@ -4,6 +4,7 @@
 #include "chunk_gdn_phased.hpp"
 
 #include <cstdlib>
+#include <cstring>
 
 #include <tt-metalium/constants.hpp>
 #include "ttnn/device_operation.hpp"
@@ -24,6 +25,35 @@ void check(const Tensor& t, const char* name, DataType dt) {
 // ---------------------------------------------------------------------------
 // PREP
 // ---------------------------------------------------------------------------
+uint32_t gdn_tinv_from_env() {
+    const char* e = std::getenv("QWEN_GDN_TINV");
+    if (e == nullptr || std::strcmp(e, "horner") == 0) {
+        return static_cast<uint32_t>(GdnTinv::HORNER);
+    }
+    if (std::strcmp(e, "sfpu_bf16") == 0) {
+        return static_cast<uint32_t>(GdnTinv::SFPU_BF16);
+    }
+    if (std::strcmp(e, "sfpu_fp32") == 0) {
+        return static_cast<uint32_t>(GdnTinv::SFPU_FP32);
+    }
+    TT_FATAL(false, "QWEN_GDN_TINV must be one of horner|sfpu_bf16|sfpu_fp32 (got '{}')", e);
+    return 0;  // unreachable
+}
+
+void validate_gdn_tinv(uint32_t tinv, uint32_t chunk_size, const Tensor& any_input) {
+    TT_FATAL(tinv <= static_cast<uint32_t>(GdnTinv::SFPU_FP32), "chunk_gdn: unknown tinv method {}", tinv);
+    if (tinv == static_cast<uint32_t>(GdnTinv::HORNER)) {
+        return;
+    }
+    TT_FATAL(
+        chunk_size == tt::constants::TILE_HEIGHT,
+        "chunk_gdn: the SFPU WY-inverse solve (QWEN_GDN_TINV) needs chunk_size == 32 (got {})",
+        chunk_size);
+    TT_FATAL(
+        any_input.device()->arch() == tt::ARCH::BLACKHOLE,
+        "chunk_gdn: the SFPU WY-inverse solve (QWEN_GDN_TINV) is Blackhole-only");
+}
+
 ChunkGdnPrepOperation::program_factory_t ChunkGdnPrepOperation::select_program_factory(
     const operation_attributes_t&, const tensor_args_t&) {
     return ChunkGdnPrepProgramFactory{};
@@ -58,6 +88,7 @@ void ChunkGdnPrepOperation::validate_on_program_cache_miss(
     TT_FATAL(attrs.chunk_size % TILE_HEIGHT == 0, "chunk_size must be a multiple of 32");
     TT_FATAL(attrs.key_dim % TILE_WIDTH == 0, "key_dim must be a multiple of 32");
     TT_FATAL(attrs.val_dim % TILE_WIDTH == 0, "val_dim must be a multiple of 32");
+    validate_gdn_tinv(attrs.tinv, attrs.chunk_size, in.q);
 }
 
 ChunkGdnPrepOperation::spec_return_value_t ChunkGdnPrepOperation::compute_output_specs(
@@ -129,6 +160,7 @@ std::vector<Tensor> chunk_gdn_prep(
         .Hk = Hk,
         .qk_norm = qk_norm,
         .scale = scale,
+        .tinv = gdn_tinv_from_env(),
         .output_mem_config = output_mem_config,
         .compute_kernel_config = compute_kernel_config,
     };

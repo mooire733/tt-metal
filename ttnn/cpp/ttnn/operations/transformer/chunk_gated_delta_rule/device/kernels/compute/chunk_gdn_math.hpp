@@ -56,6 +56,19 @@ inline constexpr bool kGdnHoistReconfig = false;
 #define GDN_ZONE(name)
 #endif
 
+// GDN_TINV_SFPU (a per-kernel define the prep factories set from the hashed `tinv` attr): replace the
+// Ct == 1 WY inverse (invert_block's Horner quadrants, ~60 LLK calls) with ONE SFPU forward-substitution
+// solve (chunk_gdn_tinv_sfpu.hpp). 1 = negN staged as bf16, 2 = negN read as fp32. It changes the
+// arithmetic, so T_inv is PCC-class against the Horner path — but both the phased prep and the fused
+// producer compile this same body for a given mode, so fused == phased stays bit-exact per mode.
+#if defined(GDN_TINV_SFPU)
+#if !defined(ARCH_BLACKHOLE)
+#error "GDN_TINV_SFPU: the SFPU triangle solve is Blackhole-only"
+#endif
+#include "chunk_gdn_tinv_sfpu.hpp"
+inline constexpr bool kGdnTinvLFp32 = (GDN_TINV_SFPU == 2);
+#endif
+
 inline void WAIT(uint32_t cb, uint32_t n) { CircularBuffer(cb).wait_front(n); }
 inline void POP(uint32_t cb, uint32_t n) { CircularBuffer(cb).pop_front(n); }
 
@@ -460,6 +473,40 @@ inline void invert_block(
     CircularBuffer(A).pop_front(1);  // + off -> out
 }
 
+#if defined(GDN_TINV_SFPU)
+// T_inv = (I - negN)^-1 for ONE 32x32 tile by the SFPU forward substitution (RHS = I, so X = T_inv).
+//   negN   : fp32 CB, tile 0 = -strictly_lower(N) (prep's cb.scr3), front-waited — exactly the
+//            pre-negated factor the solve consumes (unit diagonal implicit).
+//   cb_eye : identity tile.
+//   lstage : bf16 1-tile CB for the bf16-L variant (unused, and not pushed, for the fp32-L variant).
+//   out    : cb.Tinv (fp32).
+// Caller: WAIT(out, 1), then (bf16 variant) POP(lstage, 1) — L is read until T_inv is packed.
+inline void sfpu_tinv(uint32_t negN, uint32_t cb_eye, uint32_t lstage, uint32_t out) {
+    uint32_t cb_l = negN;
+    if constexpr (!kGdnTinvLFp32) {
+        cpy_t(negN, 0, lstage);  // fp32 -> bf16: the only rounding of L in this variant
+        WAIT(lstage, 1);
+        cb_l = lstage;
+    }
+    CircularBuffer l(cb_l);
+    cb_reserve_back(out, 1);
+    // The solve loads/stores DEST rows in the SrcB-implied format: keep both source formats on the fp32
+    // identity so DEST is read back as fp32.
+    reconfig_data_format(cb_eye, cb_eye);
+    pack_reconfig_data_format(out);
+    copy_init(cb_eye);
+    tile_regs_acquire();
+    copy_tile(cb_eye, 0, 0);  // RHS = I -> DST[0]
+    gdn_tinv_trisolve_tile_init();
+    gdn_tinv_trisolve_tile<kGdnTinvLFp32>(l, 0, /*idst_in=*/0, /*idst_out=*/1);
+    tile_regs_commit();
+    tile_regs_wait();
+    pack_tile(1, out, 0);
+    tile_regs_release();
+    cb_push_back(out, 1);
+}
+#endif
+
 // out[1,Ct] row-form = transpose of col[Ct,1]; produces Ct tiles (each row0 = a 32-chunk of col).
 inline void transpose_col(uint32_t in, uint32_t o, uint32_t Ct) {
     cb_reserve_back(o, Ct);
@@ -535,6 +582,7 @@ struct GdnPrepCbs {
     uint32_t scr1, scr2, scr3, s3;
     uint32_t dl;    // alias of the vnew slot in prep (1 tile used)
     uint32_t mask;  // alias of the u slot in prep (3 quadrant-mask tiles)
+    uint32_t lstage;  // bf16 1-tile staging for the GDN_TINV_SFPU bf16-L variant (alias of the unused-in-prep cb_out)
 };
 
 // CB map for scan_step — one field per CB the body touches (the state CBs S/s2/s3/final are
@@ -670,10 +718,19 @@ inline void prep_chunk(const GdnPrepCbs& cb, uint32_t scale_bits, uint32_t eps_b
     // writer would wrongly consume). None alias src (cb.scr3), out, or the Ct==2 persistents
     // (cb.supd/cb.stmp).
     if constexpr (Ct == 1) {
+#if defined(GDN_TINV_SFPU)
+        sfpu_tinv(cb.scr3, cb.eye, cb.lstage, cb.Tinv);
+        WAIT(cb.Tinv, cc);
+        if constexpr (!kGdnTinvLFp32) {
+            POP(cb.lstage, 1);
+        }
+        POP(cb.scr3, cc);
+#else
         // Single 32x32 block: T_inv is just its inverse.
         invert_block(cb.scr3, 0, cb.Tinv, cb.scr1, cb.scr2, cb.eye, cb.mask, cb.S, cb.final_s, cb.s2, cb.s3);
         WAIT(cb.Tinv, cc);
         POP(cb.scr3, cc);
+#endif
     } else if constexpr (Ct == 2) {
         // 2x2 tile-block lower-triangular. negN tiles: 0=(0,0), 2=(1,0), 3=(1,1); (0,1)=0.
         // Diagonal inverses Mi11, Mi22, then off-diagonal Mi21 = -Mi22 @ A21 @ Mi11.

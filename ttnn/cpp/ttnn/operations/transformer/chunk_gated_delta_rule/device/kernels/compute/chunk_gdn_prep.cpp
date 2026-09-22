@@ -71,7 +71,8 @@ constexpr GdnPrepCbs CBS{
     .scr3 = cb_scr3,
     .s3 = cb_s3,
     .dl = cb_dl,
-    .mask = cb_mask};
+    .mask = cb_mask,
+    .lstage = cb_out};
 
 }  // namespace
 

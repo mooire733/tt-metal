@@ -22,6 +22,18 @@
 
 namespace ttnn::prim {
 
+// WY-inverse method of the prep compute (the `tinv` attr of the prep and fused prims).
+//   HORNER    : invert_block — quadrant split, two 15-term Horner inverses and an exact off-diagonal on
+//               the matrix engine (~60 LLK calls per chunk). The bit-exact reference.
+//   SFPU_BF16 : one SFPU forward-substitution solve with negN staged as bf16 (the measured prototype).
+//   SFPU_FP32 : the same solve reading negN as fp32 (no staging copy, no rounding of L).
+// The SFPU methods change the arithmetic (PCC-class vs HORNER), are Blackhole-only and chunk_size == 32.
+enum class GdnTinv : uint32_t { HORNER = 0, SFPU_BF16 = 1, SFPU_FP32 = 2 };
+// QWEN_GDN_TINV = horner | sfpu_bf16 | sfpu_fp32 (unset: horner). Read at attrs construction.
+uint32_t gdn_tinv_from_env();
+// FATAL unless the method is supported for this chunk size on this device.
+void validate_gdn_tinv(uint32_t tinv, uint32_t chunk_size, const Tensor& any_input);
+
 // ---------------------------------------------------------------------------
 // PREP
 // ---------------------------------------------------------------------------
@@ -46,6 +58,10 @@ struct ChunkGdnPrepParams {
     // folds `scale` into q's norm. Only valid for chunk_size==32 (Ct==1). scale defaults to no-op.
     bool qk_norm = false;
     float scale = 1.0f;
+    // WY-inverse method (GdnTinv): Horner quadrants on the matrix engine (bit-exact reference) or the SFPU
+    // forward-substitution solve. Read from QWEN_GDN_TINV at attrs construction (hashed); the fused prim
+    // carries the same field, so fused == phased stays bit-exact for any given method.
+    uint32_t tinv = 0;
     tt::tt_metal::MemoryConfig output_mem_config;
     DeviceComputeKernelConfig compute_kernel_config;
 };

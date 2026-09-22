@@ -45,6 +45,7 @@
 // bit; any difference is plumbing (validation plan §1).
 
 #include "chunk_gdn_fused.hpp"
+#include "chunk_gdn_phased.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -343,6 +344,9 @@ tt::tt_metal::ProgramDescriptor ChunkGdnFusedProgramFactory::create_descriptor(
     prep_compute.config = fused_compute_cfg();
     // Fused-only perf: hoisted WY-path reconfigs (see chunk_gdn_math.hpp kGdnHoistReconfig).
     prep_compute.defines = {{"GDN_HOIST_RECONFIG", "1"}};
+    if (attrs.tinv != static_cast<uint32_t>(GdnTinv::HORNER)) {
+        prep_compute.defines.emplace_back("GDN_TINV_SFPU", std::to_string(attrs.tinv));
+    }
     prep_compute.runtime_args.reserve(P);
 
     // The fused writer runs on the WriterConfigDescriptor's RISC/NoC (BRISC / NOC_1 on Blackhole).

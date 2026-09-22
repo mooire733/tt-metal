@@ -22,7 +22,8 @@ The clamped SiLU-GLU cases from the reference have no counterpart here: the fuse
 Silu, SituGlu and SwiGluOai, so a clamped activation would leave every below-threshold expert
 unserved and the op rejects it outright.
 
-The op is not wired into any model; nothing here should run in CI.
+CI runs the row-major cases, which is the layout production feeds the op; the tile-layout
+variants are pruned per test with ci_pruning.tiled_x_input, exactly as the reference file does.
 """
 
 import math
@@ -55,8 +56,6 @@ from tests.ttnn.nightly.unit_tests.operations.experimental.deepseek_prefill.test
     _isl_params,
     reshard_expert_weights_nd,
 )
-
-pytestmark = pytest.mark.uncollect_if(pred=ci_pruning.no_production_counterpart)
 
 # Which half serves an expert. Fixed rather than read from each model's own
 # ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD, because the models that carry one all carry 320 and the
@@ -499,6 +498,7 @@ def _run_multi_expert(
             assert not torch.isnan(got[off : off + cnt]).any(), f"expert {e}: NaN in output"
 
 
+@pytest.mark.uncollect_if(pred=ci_pruning.tiled_x_input)
 @pytest.mark.parametrize("x_row_major", [True, False], ids=["x_rm", "x_tile"])
 @pytest.mark.skipif(not is_blackhole(), reason="the routed expert is Blackhole-only")
 def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):

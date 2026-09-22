@@ -82,7 +82,7 @@ public:
         set_scope(token.scope);
     }
 
-    // Non-Metal-2.0: a bare id carries no host-resolved mechanism, so it is the plain word.
+    // Non-Metal-2.0: a bare id carries no host-resolved mechanism.
     explicit __attribute__((always_inline)) Semaphore(uint32_t semaphore_id) : l1_offset_(sem_l1_offset(semaphore_id)) {
         set_scope(SemScope::LOCAL_NONATOMIC);
     }
@@ -313,8 +313,8 @@ public:
      */
     template <ProgrammableCoreType dst_core_type = core_type>
     void relay_unicast(const Noc& noc, const Semaphore<dst_core_type>& dst_sem, uint32_t noc_x, uint32_t noc_y) {
-        ASSERT(scope_ != SemScope::DM_LOCAL_CACHED);          // relay is not available on a cached semaphore
-        ASSERT(dst_sem.scope_ != SemScope::DM_LOCAL_CACHED);  // and cannot target one
+        ASSERT(scope_ != SemScope::DM_LOCAL_CACHED);          // relay_unicast is not available on a cached semaphore
+        ASSERT(dst_sem.scope_ != SemScope::DM_LOCAL_CACHED);  // relay_unicast cannot target a cached semaphore
         ASSERT(l1_offset_ != dst_sem.l1_offset_);
         const uint64_t dst_noc_addr = ::get_noc_addr(noc_x, noc_y, dst_sem.get_l1_addr(), noc.get_noc_id());
         noc_semaphore_set_remote(get_l1_addr(), dst_noc_addr, noc.get_noc_id());
@@ -387,7 +387,7 @@ public:
         ASSERT(
             scope_ !=
             SemScope::DM_LOCAL_CACHED);  // multicast is not available on a cached semaphore: the pool is node-private
-        ASSERT(dst_sem.scope_ != SemScope::DM_LOCAL_CACHED);  // and cannot target one
+        ASSERT(dst_sem.scope_ != SemScope::DM_LOCAL_CACHED);  // relay_multicast cannot target a cached semaphore
         ASSERT(l1_offset_ != dst_sem.l1_offset_);
         const uint64_t multicast_addr = ::get_noc_multicast_addr(
             noc_x_start, noc_y_start, noc_x_end, noc_y_end, dst_sem.get_l1_addr(), noc.get_noc_id());
@@ -430,8 +430,7 @@ public:
 private:
     uintptr_t l1_offset_;  // physical L1 offset of the semaphore word (cached-alias address)
 #if defined(ARCH_QUASAR) && !defined(COMPILE_FOR_TRISC)
-    // The mechanism the host resolved for this semaphore. It comes from a constexpr token, so
-    // it folds away once the constructor is inlined.
+    // The mechanism the host resolved for this semaphore.
     SemScope scope_;
     __attribute__((always_inline)) void set_scope(SemScope scope) { scope_ = scope; }
 #else
@@ -478,7 +477,7 @@ private:
 namespace sem_internal {
 
 // Cached-pool entry/exit for the DM_LOCAL_CACHED semaphores a kernel binds. The generated
-// header lists them (sem_internal::kCachedSemaphores) and dmk.cc calls these around
+// header lists them (sem_internal::kCachedSemaphores) and these are called around
 // kernel_main(). A cached semaphore's pool row must be seeded with its init value once per
 // program, by exactly one hart, before anyone touches it, and is left clean for the next
 // program. Each 8B row is [0] = the counter, [1] = a bookkeeping word: entered[15:0],
@@ -511,8 +510,8 @@ __attribute__((always_inline)) inline void restore_cached_row(const CachedSemaph
     }
 }
 
-// One straight-line block per semaphore, unrolled at compile time over the constexpr list (I is
-// the index). dmk.cc's _start() must not loop over a table address: see its XIP relocation note.
+// Handles the semaphores one after another with no loop: the recursion over I unrolls at compile
+// time into one block per semaphore.
 template <ProgrammableCoreType core_type, std::size_t N, std::size_t I = 0>
 __attribute__((always_inline)) inline void init_dm_local_cached(const CachedSemaphore (&sems)[N]) {
     if constexpr (I < N) {

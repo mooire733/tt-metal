@@ -55,8 +55,8 @@ inline void emit_semaphore_binding_tokens(std::ostream& os, const std::vector<Se
     os << "}  // namespace sem\n";
 }
 
-// The kernel's DM_LOCAL_CACHED bindings, as one constexpr list. dmk.cc runs the cached-pool
-// entry/exit over it around kernel_main() (sem_internal::init_dm_local_cached, noc_semaphore.h).
+// Emits the list of cached semaphores this kernel binds: each one's id and how many harts on
+// this core use it.
 inline void emit_cached_semaphore_list(std::ostream& os, const std::vector<SemBindingEntry>& entries) {
     os << "namespace sem_internal {\n";
     os << "constexpr ::sem_internal::CachedSemaphore kCachedSemaphores[] = {";

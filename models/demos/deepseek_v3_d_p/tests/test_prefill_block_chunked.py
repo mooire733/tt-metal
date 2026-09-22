@@ -980,8 +980,6 @@ def test_kimi_prefill_block_chunked_padded(
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Mistral Small 4 chunked block test
 # ---------------------------------------------------------------------------
@@ -1034,6 +1032,7 @@ def test_mistral4_prefill_block_chunked(
         num_links,
         topology,
     )
+
 
 # ---------------------------------------------------------------------------
 # GLM DSA indexer-K teacher-forced check

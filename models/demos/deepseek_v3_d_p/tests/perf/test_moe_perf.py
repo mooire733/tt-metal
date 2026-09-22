@@ -87,11 +87,11 @@ def test_deepseek_v3_moe_perf_loudbox():
     """
     run_moe_perf_with_approximation(
         command_8x1=_CMD_8X1,
-        # Re-cut 2026-09-07 on the CI LoudBox (bh_loudbox), run 34128459250. One sample.
-        # The routed expert is the whole delta: it reads 994,733 ns against a 2,365,321 ns
-        # remainder the previous centre also had to contain, which puts the op alone at 1.67x --
-        # inside the 1.10-1.69x its own gate records at these token counts.
-        expected_ns_8x1=3_360_055,
+        # Re-cut 2026-09-22 on the CI LoudBox (bh_loudbox), run 35739065634. One sample.
+        # Supersedes 3,360,055 from run 34128459250 (2026-09-07): the kernel is now 3.6%
+        # faster, which just exceeds the 3% band. The routed expert is the whole delta
+        # (reads 994,733 ns against a 2,365,321 ns remainder at the prior centre).
+        expected_ns_8x1=3_237_489,
         model_name_8x1="deepseek_v3_moe_lb_8x1_torus_y_dispatch_combine",
         command_2x4=_CMD_2X4,
         # Re-cut 2026-09-15 on the CI LoudBox (bh_loudbox). One sample, and UNATTRIBUTED: the 8x1

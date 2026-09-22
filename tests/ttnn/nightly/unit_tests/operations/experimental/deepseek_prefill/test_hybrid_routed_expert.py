@@ -327,6 +327,29 @@ def test_hybrid_routed_expert_threshold_zero(device):
 # per-expert region offsets are all non-zero but the first.
 _MULTI_EXPERT_COUNTS = [96, 512, 160, 640]
 
+# The production dispatch buffer is NOT one per-expert maximum wide. It is the per-expert maximum
+# times a capacity factor, shared by every local expert, plus one tile per expert boundary for the
+# tile-aligned region starts -- init_helpers.compute_constants, fed the factor the prefill runner
+# defaults PREFILL_CAPACITY_FACTOR to. Mirror that here so the op is graded on the buffer it meets
+# in the model, with regions well inside a buffer several times deeper than any one of them.
+_DISPATCH_BUFFER_CAPACITY_FACTOR = 8
+
+
+def _dispatch_buffer_rows(max_tokens_per_expert: int, experts_per_chip: int) -> int:
+    """Rows in the per-chip dispatch buffer, as compute_constants sizes it."""
+    raw = max_tokens_per_expert * _DISPATCH_BUFFER_CAPACITY_FACTOR
+    return raw + ttnn.TILE_SIZE * (min(raw, experts_per_chip) - 1)
+
+
+def _tile_aligned_region_offsets(counts: list[int]) -> list[int]:
+    """Region start per expert: the exclusive prefix sum of the tile-rounded counts, as
+    offset_cumsum lays them out. Every region starts on a tile boundary whatever the counts."""
+    offsets, running = [], 0
+    for c in counts:
+        offsets.append(running)
+        running += -(-c // ttnn.TILE_SIZE) * ttnn.TILE_SIZE
+    return offsets
+
 
 @pytest.mark.parametrize("x_row_major", [True, False], ids=["x_rm", "x_tile"])
 @pytest.mark.skipif(not is_blackhole(), reason="the routed expert is Blackhole-only")
@@ -338,14 +361,17 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
     or cross-expert CB state would all still pass them. Runs twice on different buffers, because
     the per-expert weight addresses are re-patched on a program-cache hit and a wrong slot there
     only shows on the second call.
+
+    The buffer is sized and laid out as dispatch does it in the model: capacity-factor times the
+    per-expert maximum plus the alignment reserve, with each region at a tile-aligned offset. The
+    per-expert maximum handed to the op stays _ISL_ALLOCATED_TOKENS, as in the single-expert cases.
     """
     emb_dim, hidden_dim = DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE
     counts = _MULTI_EXPERT_COUNTS
-    offsets, running = [], 0
-    for c in counts:
-        offsets.append(running)
-        running += c
-    assert running <= _ISL_ALLOCATED_TOKENS
+    offsets = _tile_aligned_region_offsets(counts)
+    buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, len(counts))
+    assert all(c <= _ISL_ALLOCATED_TOKENS for c in counts), "no expert may exceed the per-expert maximum"
+    assert offsets[-1] + counts[-1] <= buffer_rows
     assert any(c <= _THRESHOLD for c in counts) and any(
         c > _THRESHOLD for c in counts
     ), "the point of this case is that both halves run; counts must straddle the threshold"
@@ -360,7 +386,7 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
             }
             for _ in counts
         ]
-        torch_input = torch.zeros(_ISL_ALLOCATED_TOKENS, emb_dim, dtype=torch.float32)
+        torch_input = torch.zeros(buffer_rows, emb_dim, dtype=torch.float32)
         for off, cnt in zip(offsets, counts):
             torch_input[off : off + cnt] = torch.randn(cnt, emb_dim, dtype=torch.float32)
 

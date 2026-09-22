@@ -927,7 +927,6 @@ void Cluster::write_core_immediate(const void* mem_ptr, uint32_t sz_in_bytes, tt
 }
 
 void Cluster::read_core(std::vector<uint32_t>& data, uint32_t size_in_bytes, tt_cxy_pair core, uint64_t addr) const {
-    // Round up so sub-word reads still get a destination (a 0-element vector hands nullptr to the transport).
     data.resize((size_in_bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t));
     read_core(data.data(), size_in_bytes, core, addr);
 }

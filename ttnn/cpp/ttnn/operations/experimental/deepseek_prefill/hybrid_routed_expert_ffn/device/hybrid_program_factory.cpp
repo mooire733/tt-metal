@@ -2899,20 +2899,21 @@ uint32_t arena_bytes_for(tt::tt_metal::IDevice* device) {
     return usable & ~static_cast<uint32_t>(63);
 }
 
-PassBarrierPlan barrier_plan(tt::tt_metal::IDevice* device) {
+PassBarrierPlan barrier_plan(tt::tt_metal::IDevice* device, tt::tt_metal::NOC coordinator_noc) {
     const tt::tt_metal::CoreCoord master{0, kOriginY};
     const auto master_noc = device->worker_core_from_logical_core(master);
-    const auto first = device->worker_core_from_logical_core(tt::tt_metal::CoreCoord{0, kOriginY});
-    const auto last = device->worker_core_from_logical_core(tt::tt_metal::CoreCoord{kGridX - 1, kOriginY + kGridY - 1});
+    // Oriented for the NoC the coordinator multicasts on, through the same helper the fused
+    // half's own multicasts use, so the barrier cannot drift from the rule they follow.
+    const auto rect = fused::mcast_rect_args(device, coordinator_noc, 0, kOriginY, kGridX - 1, kOriginY + kGridY - 1);
     const uint32_t cores = kGridX * kGridY;
     return PassBarrierPlan{
         .master_logical = master,
         .master_noc_x = static_cast<uint32_t>(master_noc.x),
         .master_noc_y = static_cast<uint32_t>(master_noc.y),
-        .rect_x_start = static_cast<uint32_t>(first.x),
-        .rect_y_start = static_cast<uint32_t>(first.y),
-        .rect_x_end = static_cast<uint32_t>(last.x),
-        .rect_y_end = static_cast<uint32_t>(last.y),
+        .rect_x_start = rect[0],
+        .rect_y_start = rect[1],
+        .rect_x_end = rect[2],
+        .rect_y_end = rect[3],
         // Non-loopback multicast drops the sender's own copy.
         .num_receivers = cores - 1,
         // Reader and writer both arrive on every core.
@@ -3084,7 +3085,7 @@ tt::tt_metal::ProgramDescriptor create_hybrid_program_descriptor(
         merged_kernel_sources(),
         /*run_fused_pass=*/true,
         t.l1_arena->buffer(),
-        barrier_plan(t.x.device()),
+        barrier_plan(t.x.device(), kPassBarrierCoordinatorNoc),
         report);
 
     // The merge's own numbers, on a program-cache miss only. Every one of them is a silent-failure

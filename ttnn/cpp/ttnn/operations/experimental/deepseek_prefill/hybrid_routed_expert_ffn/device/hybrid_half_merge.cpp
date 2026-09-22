@@ -414,10 +414,12 @@ tt::tt_metal::ProgramDescriptor merge_halves(
     };
 
     // The barrier's master is the coordinator kernel on the master core, and the coordinator is
-    // identified by role: the kernel whose config is the empty ReaderConfigDescriptor. If neither
-    // half declares a reader that way -- say both moved to an explicit DataMovementConfigDescriptor
-    // -- no kernel would ever count arrivals or release the grid, and every core would spin at the
-    // barrier forever. Catch that on the host.
+    // identified by role: the kernel whose config is the empty ReaderConfigDescriptor. That
+    // descriptor puts it on NOC_0, which is what kPassBarrierCoordinatorNoc records and what the
+    // barrier plan orients its rectangle for; the two must move together. If neither half declares
+    // a reader that way -- say both moved to an explicit DataMovementConfigDescriptor -- no kernel
+    // would ever count arrivals or release the grid, and every core would spin at the barrier
+    // forever. Catch that on the host.
     bool saw_coordinator = false;
     for (const auto& [role, fused_kernel] : fused_by_role) {
         const auto unified_it = unified_by_role.find(role);

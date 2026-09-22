@@ -80,6 +80,14 @@ inline void hybrid_pass_barrier() {
     // waits on before it can itself arrive here, so the master's full arrival count implies every
     // payload landed. A pass-A change that multicasts a posted payload to a core that does NOT
     // wait on a trailing flag would slip past this barrier.
+    //
+    // These drain THIS RISC's NoC only, and that is the whole of what pass A used: both fused
+    // dataflow bodies bind every transaction to their own noc_index (dedicated-NoC mode, reader on
+    // NOC_0, writer on NOC_1), and the merge refuses a half that changes noc_mode. Do NOT "fix"
+    // this by barriering the other NoC as well. In dedicated mode the barrier compares this RISC's
+    // software issue counter against a hardware counter the two RISCs share per NoC; on the NoC
+    // this RISC never used, its counter is zero while the register carries the other RISC's
+    // traffic, so that wait never returns.
     noc.async_write_barrier();
     noc.async_read_barrier();
     noc_async_atomic_barrier();

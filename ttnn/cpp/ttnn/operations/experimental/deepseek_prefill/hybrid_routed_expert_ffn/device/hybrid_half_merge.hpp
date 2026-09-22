@@ -25,10 +25,20 @@ struct MergedKernelSources {
 //
 // `shared_semaphore_count` is how many ids the master zeroes before releasing; the barrier's own
 // id sits above them and must survive.
+// The NoC the pass barrier's coordinator issues its multicasts on. The coordinator is the reader
+// kernel (merge_program picks the role whose config is the empty ReaderConfigDescriptor), and
+// that descriptor puts the reader on NOC_0. The barrier plan orients its release rectangle for
+// THIS NoC: a multicast rectangle is given low-to-high on NOC_0 and high-to-low on NOC_1, and one
+// given the wrong way round covers no receivers, which hangs the grid at the release with no
+// diagnostic. Change the coordinator and this must change with it.
+inline constexpr tt::tt_metal::NOC kPassBarrierCoordinatorNoc = tt::tt_metal::NOC::NOC_0;
+
 struct PassBarrierPlan {
     tt::tt_metal::CoreCoord master_logical;
     uint32_t master_noc_x = 0;
     uint32_t master_noc_y = 0;
+    // Multicast rectangle in the coordinator's NoC order (see kPassBarrierCoordinatorNoc); the
+    // kernel passes these four straight through.
     uint32_t rect_x_start = 0;
     uint32_t rect_y_start = 0;
     uint32_t rect_x_end = 0;

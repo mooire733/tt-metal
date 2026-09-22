@@ -343,8 +343,10 @@ struct HybridRoutedExpertFfnInputs {
     // Per-core L1 scratch both halves' circular buffers are laid over. Required whenever pass A
     // runs: the two halves' buffers sum to more L1 than a core has, and overlaying them -- safe
     // because the passes are ordered, never concurrent -- is what lets both keep the whole grid.
-    // Owned by the caller because the program keeps a raw pointer to it that must stay valid
-    // across program-cache hits.
+    // The merge binds every circular buffer to this tensor's buffer at an offset, and a
+    // program-cache hit re-reads the address from whatever tensor THIS call passes, so a fresh
+    // arena per call is fine. What is required is that it be passed on every call and stay alive
+    // until the op has run; a caller that frees it early corrupts rather than hangs.
     std::optional<Tensor> l1_arena;
 };
 

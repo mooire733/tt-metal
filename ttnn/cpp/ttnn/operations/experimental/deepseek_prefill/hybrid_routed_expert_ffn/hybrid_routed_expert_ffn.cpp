@@ -92,9 +92,10 @@ ttnn::Tensor hybrid_routed_expert_moe(
     }
 
     // The L1 arena both halves' circular buffers are laid over, allocated here rather than
-    // inside the op: the program keeps a raw pointer to this buffer and re-reads its address on
-    // every program-cache hit, so it must be owned by something that outlives the program. One
-    // shard per worker core, which gives every core an arena at one common L1 address.
+    // inside the op: the program binds its circular buffers to this buffer and re-reads the
+    // address from the tensor passed on each call, including program-cache hits, so it must be
+    // owned by the caller and outlive the launch. A fresh arena per call is fine. One shard per
+    // worker core, which gives every core an arena at one common L1 address.
     std::optional<ttnn::Tensor> l1_arena;
     if (fused_half_runs) {
         auto* device = dispatched_buffer.device();

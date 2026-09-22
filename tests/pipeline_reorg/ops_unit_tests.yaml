@@ -95,9 +95,9 @@
   cmd: 'pytest tests/ttnn/nightly/unit_tests/operations/experimental --ignore=tests/ttnn/nightly/unit_tests/operations/experimental/fft -xv -k "not performance" -m "not requires_host_iommu" --timeout=600'
   skus:
     bh_p100:
-      timeout: 60
+      timeout: 65
     bh_p150b_civ2:
-      timeout: 40
+      timeout: 45
   owner_id: U080FKG7KEU # Utku Aydonat
   team: ttnn
   budget_type: unit
@@ -131,7 +131,7 @@
       -m requires_host_iommu -xv --timeout=600
   skus:
     bh_p150b_civ2_viommu:
-      timeout: 15
+      timeout: 20
   owner_id: U09L76N1MAT  # Nenad Babin
   team: ttnn
   budget_type: unit

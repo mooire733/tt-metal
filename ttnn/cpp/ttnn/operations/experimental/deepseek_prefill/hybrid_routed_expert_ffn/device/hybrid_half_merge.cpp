@@ -35,6 +35,16 @@ uint32_t merge_semaphores(const ProgramDescriptor& fused, const ProgramDescripto
     std::map<uint32_t, SemaphoreDescriptor> by_id;
     for (const auto* half : {&fused, &unified}) {
         for (const auto& sem : half->semaphores) {
+            // The pass barrier zeroes every id below its own before pass B starts, whatever either
+            // half declared. An id that starts non-zero would pass the merge and be silently reset
+            // under the half that declared it; both halves start everything at zero today, and this
+            // holds them to it.
+            TT_FATAL(
+                sem.initial_value == 0,
+                "semaphore {} starts at {}, but the pass barrier zeroes the whole shared block before pass B; only "
+                "zero-initialised semaphores can be shared between the halves",
+                sem.id,
+                sem.initial_value);
             auto [it, inserted] = by_id.emplace(sem.id, sem);
             if (!inserted) {
                 // Sharing an id is the design; sharing it with a different shape is not, and the
@@ -222,6 +232,21 @@ KernelDescriptor merge_kernel(
     TT_FATAL(
         fused.config.index() == unified.config.index(),
         "the two halves disagree on this kernel's processor class, so they cannot share a binary");
+    // Equal variants only say both halves are readers, writers or compute kernels. An explicit
+    // DataMovementConfigDescriptor can still name a different processor or NoC per half, and the
+    // merged binary can only ride one. The pass barrier is what makes this matter: its release
+    // multicast is issued on the coordinator's NoC with a rectangle ordered for that NoC, so a
+    // half on a NoC the barrier plan did not expect would leave the release covering no receivers
+    // -- a hang with no diagnostic. Both halves use the empty Reader/Writer descriptors today, so
+    // this branch is dormant; it is here for the day one of them does not.
+    if (const auto* fused_dm = std::get_if<tt::tt_metal::DataMovementConfigDescriptor>(&fused.config)) {
+        const auto& unified_dm = std::get<tt::tt_metal::DataMovementConfigDescriptor>(unified.config);
+        TT_FATAL(
+            fused_dm->processor == unified_dm.processor && fused_dm->noc == unified_dm.noc &&
+                fused_dm->noc_mode == unified_dm.noc_mode,
+            "the two halves place this data-movement kernel on different processors or NoCs; one binary can only "
+            "ride one, and the pass barrier's release rectangle is ordered for the coordinator's NoC");
+    }
 
     KernelDescriptor merged = fused;
     merged.kernel_source = source;
@@ -388,6 +413,12 @@ tt::tt_metal::ProgramDescriptor merge_halves(
         {KernelDescriptor::ConfigDescriptor(tt::tt_metal::ComputeConfigDescriptor{}).index(), &report.compute},
     };
 
+    // The barrier's master is the coordinator kernel on the master core, and the coordinator is
+    // identified by role: the kernel whose config is the empty ReaderConfigDescriptor. If neither
+    // half declares a reader that way -- say both moved to an explicit DataMovementConfigDescriptor
+    // -- no kernel would ever count arrivals or release the grid, and every core would spin at the
+    // barrier forever. Catch that on the host.
+    bool saw_coordinator = false;
     for (const auto& [role, fused_kernel] : fused_by_role) {
         const auto unified_it = unified_by_role.find(role);
         TT_FATAL(unified_it != unified_by_role.end(), "the unified half has no kernel for processor class {}", role);
@@ -396,18 +427,24 @@ tt::tt_metal::ProgramDescriptor merge_halves(
         const auto bases_it = bases_for_role.find(role);
         TT_FATAL(bases_it != bases_for_role.end(), "no report slot for processor class {}", role);
 
+        const bool is_coordinator_kernel =
+            role == KernelDescriptor::ConfigDescriptor(tt::tt_metal::ReaderConfigDescriptor{}).index();
+        saw_coordinator = saw_coordinator || is_coordinator_kernel;
         merged.kernels.push_back(merge_kernel(
             *fused_kernel,
             *unified_it->second,
             *source_it->second,
             run_fused_pass,
             barrier,
-            /*is_coordinator_kernel=*/role ==
-                KernelDescriptor::ConfigDescriptor(tt::tt_metal::ReaderConfigDescriptor{}).index(),
+            is_coordinator_kernel,
             report.barrier_semaphore_id,
             /*shared_semaphore_count=*/report.barrier_semaphore_id,
             *bases_it->second));
     }
+    TT_FATAL(
+        saw_coordinator,
+        "no kernel uses ReaderConfigDescriptor, so the pass barrier has no coordinator to count arrivals and release "
+        "the grid; the union would hang at the barrier on every core");
     return merged;
 }
 

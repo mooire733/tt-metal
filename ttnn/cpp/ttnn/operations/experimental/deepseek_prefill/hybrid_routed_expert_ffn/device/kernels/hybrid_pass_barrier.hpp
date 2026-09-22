@@ -72,6 +72,14 @@ inline void hybrid_pass_barrier() {
     // increment that overtakes an outstanding transaction would release the grid over data still
     // moving. READS matter as much as writes here -- the two halves' circular buffers alias the
     // same arena bytes, so a pass-A read landing after the release is overwritten by pass B.
+    //
+    // What these barriers do NOT cover is a POSTED multicast: the fused half's payload multicasts
+    // are posted, and no barrier on this core can prove they landed at their receivers. They are
+    // covered anyway, by the protocol rather than by this barrier -- every posted payload is
+    // followed on the same VC and rectangle by a non-posted flag multicast that each receiver
+    // waits on before it can itself arrive here, so the master's full arrival count implies every
+    // payload landed. A pass-A change that multicasts a posted payload to a core that does NOT
+    // wait on a trailing flag would slip past this barrier.
     noc.async_write_barrier();
     noc.async_read_barrier();
     noc_async_atomic_barrier();

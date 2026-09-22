@@ -152,8 +152,8 @@ FORCE_INLINE uint64_t cq_mcast_noc_addr(uint32_t packed_rect, uint64_t offset) {
 #if defined(NOC_ATT_ENABLED)
 // Stateful CQ reads whose source is a bank id. The address backend turns the bank id
 // into the operand's base (under ATT a DRAM bank maps straight to its selector, with no
-// table search). So the command-queue kernels can name DRAM and L1 banks by bank number 
-// and let the address backend produce the address, instead of naming them by coordinates 
+// table search). So the command-queue kernels can name DRAM and L1 banks by bank number
+// and let the address backend produce the address, instead of naming them by coordinates
 // and converting. These sit here, not in the V3 API header, because the backend and the
 // bank tables are only available once the dataflow address layer has been included.
 template <bool is_dram>

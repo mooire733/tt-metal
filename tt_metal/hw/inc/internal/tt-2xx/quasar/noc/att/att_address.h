@@ -323,7 +323,7 @@ constexpr ResolvedTile resolve_host_coordinate(const MapData& map, std::uint32_t
     return resolve_current(map, x + map.node_id_offset_x, y + map.node_id_offset_y);
 }
 
-// Whether a kernel-visible (host/descriptor frame) coordinate names the initiator whose NOC_NODE_ID 
+// Whether a kernel-visible (host/descriptor frame) coordinate names the initiator whose NOC_NODE_ID
 // coordinates are (@p noc_x, @p noc_y).
 constexpr bool host_coordinate_is_current(
     const MapData& map, std::uint32_t x, std::uint32_t y, std::uint32_t noc_x, std::uint32_t noc_y) {

@@ -448,9 +448,12 @@ inline void hyb_hw_startup() { compute_kernel_hw_startup<SrcOrder::Reverse>(cb_x
 void kernel_main() {
 #ifdef HYB_NS
     // A half of the union kernel never starts the hardware itself -- startup is MMIO against units
-    // that must be idle, so it runs exactly once, before either body. Whether this half is first or
-    // second, pointing the already-configured units at its own operands is the supported path.
-    reconfig_data_format(cb_x_tiles, cb_w_gate);
+    // that must be idle, so it runs exactly once, before either body. This re-points the configured
+    // unpacker and packer at this half's operands with the same SrcA/SrcB mapping the startup used
+    // (Reverse: w_gate -> SrcA, x -> SrcB). For the half that runs first it repeats what the startup
+    // just did; for the second it replaces the other half's operands. Either way it is belt and
+    // braces: every phase below reconfigures for its own operand pair before the first unpack.
+    reconfig_data_format<SrcOrder::Reverse>(cb_x_tiles, cb_w_gate);
     pack_reconfig_data_format(cb_gate_acc);
 #else
     // Ahead of the runtime args, not because it needs them -- the operand CBs are compile-time --

@@ -1009,9 +1009,12 @@ void kernel_main() {
     // A half of the union kernel never starts the hardware itself; the union ran startup once,
     // before either body. The two halves' startups differ ONLY in their operand CBs -- both pass
     // SrcOrder::Reverse, and the program factory refuses to let them disagree on the
-    // dst-accumulator mode -- so pointing the configured units at this half's operands is all
-    // that is left, and the header names the reconfig pair as the supported way to do it.
-    reconfig_data_format(cb_in0_x, cb_in1_gate);
+    // dst-accumulator mode. This re-points the configured unpacker and packer at this half's
+    // operands with that same mapping (in1_gate -> SrcA, in0_x -> SrcB). For the half that runs
+    // first it repeats what the startup just did; for the second it replaces the other half's
+    // operands. Either way it is belt and braces: every phase below reconfigures for its own
+    // operand pair before the first unpack.
+    reconfig_data_format<SrcOrder::Reverse>(cb_in0_x, cb_in1_gate);
     pack_reconfig_data_format(cb_partials_gu);
 #else
     // First Compute API call in the kernel, as compute_kernel_hw_startup.h requires: it does MMIO

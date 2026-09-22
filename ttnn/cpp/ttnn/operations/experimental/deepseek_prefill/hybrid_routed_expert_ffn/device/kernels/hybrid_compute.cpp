@@ -63,12 +63,12 @@
 #undef HYB_CT_BASE
 #undef HYB_RT_BASE
 
-// After both halves, so it sees the dataflow API they pulled in; compiles to nothing on a compute
-// kernel, which has no NoC of its own.
 // Both halves have pulled in the CB API by now, so the shims declared above can be defined.
 #define HYB_CB_SHIMS_DEFINE 1
 #include "hybrid_cb_shims.hpp"
 
+// Compiles to nothing on a compute kernel, which has no NoC of its own and takes no part in the
+// pass barrier; included after both halves to mirror the reader and writer wrappers.
 #include "hybrid_pass_barrier.hpp"
 
 void kernel_main() {

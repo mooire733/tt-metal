@@ -235,7 +235,7 @@ def reset_metal_env() -> None:
     Finalizing it here, while its own env is still standing, is what keeps that from
     happening.
     """
-    gc.collect()
+    # gc.collect()
     close_device_mesh()
     gc.collect()
     ttml.core.distributed.release_metal_env()

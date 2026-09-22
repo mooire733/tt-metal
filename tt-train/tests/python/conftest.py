@@ -137,11 +137,26 @@ def _restore_mgd_path(previous: Optional[str]) -> None:
         os.environ["TT_MESH_GRAPH_DESC_PATH"] = previous
 
 
-def _close_device_mesh_quietly() -> None:
+def _reset_metal_env_quietly() -> None:
+    """Reverse ``open_device_mesh`` (close device, disable fabric, clear the global mesh) and
+    drop the MetalEnv, swallowing errors so teardown never masks a real failure."""
     try:
-        ttml.close_device_mesh()
+        ttml.reset_metal_env()
     except Exception:  # noqa: BLE001
         pass
+
+
+@pytest.fixture(scope="session")
+def reset_metal_env_quietly():
+    """``reset_metal_env_quietly()`` -- drop the MetalEnv, swallowing errors.
+
+    A fixture rather than an importable helper: this directory's conftest is imported
+    under a name derived from the repo root, so a test module that did
+    ``from conftest import ...`` would execute this file a second time.
+
+    Session-scoped so fixtures of any scope can request it.
+    """
+    return _reset_metal_env_quietly
 
 
 @pytest.fixture(scope="module")
@@ -156,7 +171,10 @@ def tp_mesh():
     dp_expected, tp_expected = TP_MESH_SHAPE
     _skip_if_host_too_small(TP_MESH_SHAPE, "tensor-parallel tests")
     previous_mgd = _ensure_mgd_path(TP_MESH_SHAPE)
-    _close_device_mesh_quietly()
+    # After the MGD is settled, not before: the host-size check above already built a
+    # MetalEnv against whatever descriptor was set then, and a MetalEnv never re-reads
+    # TT_MESH_GRAPH_DESC_PATH.
+    ttml.reset_metal_env()
     try:
         ttml.open_device_mesh(ttml.Mesh(TP_MESH_SHAPE, ("dp", "tp")))
         ctx = ttml.autograd.AutoContext.get_instance()
@@ -176,11 +194,11 @@ def tp_mesh():
         else:
             ctx.initialize_parallelism_context(ttml.autograd.DistributedConfig(enable_ddp=False, enable_tp=True))
     except Exception:  # noqa: BLE001
-        _close_device_mesh_quietly()
+        _reset_metal_env_quietly()
         _restore_mgd_path(previous_mgd)
         raise
 
     yield ttml.mesh()
 
-    _close_device_mesh_quietly()
+    _reset_metal_env_quietly()
     _restore_mgd_path(previous_mgd)

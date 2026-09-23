@@ -249,4 +249,39 @@ ALWI void hardsigmoid_tt_poly_bf16_program_init() {
 #endif
 }
 
+/** Internal BF16 typed-compiler route; public callers retain the stock entry point. */
+ALWI void hardshrink_tt_poly_bf16_tile(uint32_t idst, uint32_t param0) {
+#if defined(TT_POLY_LLK_DISABLE) || !(defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE))
+    hardshrink_tile(idst, param0);
+#else
+    if constexpr (DST_ACCUM_MODE) {
+        hardshrink_tile(idst, param0);
+    } else {
+        if (param0 != 0x3f000000u) {
+            hardshrink_tile(idst, param0);
+            return;
+        }
+        MATH(SFPU_UNARY_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            calculate_hardshrink_tt_poly_bf16,
+            (8 /* ITERATIONS */),
+            idst,
+            VectorMode::RC));
+    }
+#endif
+}
+
+/** Initialize the internal BF16 typed-compiler route. */
+ALWI void hardshrink_tt_poly_bf16_tile_init() {
+    if constexpr (DST_ACCUM_MODE) {
+        hardshrink_tile_init();
+    } else {
+        hardshrink_tile_init();
+#if !defined(TT_POLY_LLK_DISABLE) && (defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE))
+        MATH(sfpu::init_hardshrink_tt_poly_bf16());
+#endif
+    }
+}
+
 }  // namespace ckernel

@@ -215,6 +215,7 @@ Activation functions
   softplus_tile
   softsign_tile
   hardsigmoid_tile
+  hardshrink_tile
   hardtanh_tile
 
 Data manipulation and processing

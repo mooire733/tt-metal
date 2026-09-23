@@ -2153,9 +2153,10 @@
 - name: CosyVoice-300M e2e tests
   cmd: |
     set -e
-    export HF_HUB_OFFLINE=0   # the job default is offline; the assets below come from the Hub
-    unset HF_HUB_CACHE        # shared cache is read-only; snapshot_download writes to local_dir only
-    python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='mtairum/cosyvoice-300m-ttnn-ci-assets', repo_type='dataset', local_dir='models/demos/cosyvoice/tests/golden')"
+    # Goldens + fp16 weight exports (see the .gitignore in tests/golden): a release asset built with
+    # the PR's own scripts. Without these every device test skips and the job is green on nothing.
+    curl -sSfL --retry 3 -o /tmp/cosyvoice_ci_assets.tar.gz https://github.com/mtairum/cosyvoice-300m-ttnn-ci-assets/releases/download/v1/cosyvoice_ci_assets_v1.tar.gz
+    tar -xzf /tmp/cosyvoice_ci_assets.tar.gz -C models/demos/cosyvoice/tests/golden/
     export COSYVOICE_INPUTS=models/demos/cosyvoice/tests/golden/inputs
     pytest models/demos/cosyvoice/tests/e2e/ -v --timeout 1800
     unset TT_METAL_WATCHER

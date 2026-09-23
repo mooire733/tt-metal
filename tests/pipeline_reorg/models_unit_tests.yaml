@@ -2178,3 +2178,27 @@
   owner_id: U087HGJ455E # Sudhanshu Singhal
   team: shield
   budget_type: unit
+
+# CosyVoice-300M (PR #52540). Goldens and fp16 weight exports are not in the tree (see
+# models/demos/cosyvoice/tests/golden/.gitignore); the tests skip cleanly without them, so
+# they are fetched first or the job would be green on skips alone.
+- name: CosyVoice-300M unit tests
+  cmd: |
+    set -e
+    export HF_HUB_OFFLINE=0   # the job default is offline; the assets below come from the Hub
+    unset HF_HUB_CACHE        # shared cache is read-only; snapshot_download writes to local_dir only
+    export TT_METAL_WATCHER=30
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='mtairum/cosyvoice-300m-ttnn-ci-assets', repo_type='dataset', local_dir='models/demos/cosyvoice/tests/golden')"
+    pytest models/demos/cosyvoice/tests/pcc/ -v --timeout 900
+  model: cosyvoice-300m
+  model_family: CosyVoice
+  skus:
+    wh_n300:
+      timeout: 30
+      tier: 3
+    bh_p150:
+      timeout: 30
+      tier: 3
+  owner_id: U03PUAKE719
+  team: models
+  budget_type: unit

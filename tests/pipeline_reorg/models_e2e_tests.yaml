@@ -2146,3 +2146,29 @@
 #       release_ready: false
 #   owner_id: U07K00A281X # Kevin Wu
 #   team: train
+
+# CosyVoice-300M (PR #52540). e2e synthesis plus the perf suite; tests/perf/gates.py asserts the
+# tok/s and RTF thresholds (and the recorded bands for the ones not met), so this job is what
+# checks the published PERF.md numbers. Perf runs without the watcher.
+- name: CosyVoice-300M e2e tests
+  cmd: |
+    set -e
+    export HF_HUB_OFFLINE=0   # the job default is offline; the assets below come from the Hub
+    unset HF_HUB_CACHE        # shared cache is read-only; snapshot_download writes to local_dir only
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='mtairum/cosyvoice-300m-ttnn-ci-assets', repo_type='dataset', local_dir='models/demos/cosyvoice/tests/golden')"
+    export COSYVOICE_INPUTS=models/demos/cosyvoice/tests/golden/inputs
+    pytest models/demos/cosyvoice/tests/e2e/ -v --timeout 1800
+    unset TT_METAL_WATCHER
+    pytest models/demos/cosyvoice/tests/perf/ -v -s --timeout 1800
+  model: cosyvoice-300m
+  model_family: CosyVoice
+  skus:
+    wh_n300:
+      timeout: 60
+      tier: 3
+    bh_p150:
+      timeout: 60
+      tier: 3
+  owner_id: U03PUAKE719
+  team: models
+  budget_type: e2e

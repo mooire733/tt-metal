@@ -401,4 +401,19 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_expm1_bf16.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_factored_cw_expm1.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_factored_cw_expm1_core.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_acos_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_acos_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_sqrt_factored.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_sqrt_factored_core.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_acosh_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_core_bridge_exponent.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_core_bridge_rational.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_dst_core.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_interleaved_core.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_scalar_tile.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_segment_core.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_atanh_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_atanh_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_parity.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_parity_core.h
 )

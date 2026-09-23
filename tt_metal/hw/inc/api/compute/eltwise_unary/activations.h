@@ -284,4 +284,38 @@ ALWI void hardshrink_tt_poly_bf16_tile_init() {
     }
 }
 
+/** Internal BF16 typed-compiler route; public callers retain the stock entry point. */
+template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE>
+ALWI void celu_tt_poly_bf16_tile(uint32_t idst, uint32_t alpha, uint32_t alpha_recip) {
+#if defined(TT_POLY_LLK_DISABLE) || !((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && \
+                                      defined(TT_METAL_SFPU_SINGLE_TILE_DST) && TT_METAL_SFPU_SINGLE_TILE_DST == 1)
+    celu_tile<is_fp32_dest_acc_en>(idst, alpha, alpha_recip);
+#else
+    if constexpr (is_fp32_dest_acc_en) {
+        celu_tile<is_fp32_dest_acc_en>(idst, alpha, alpha_recip);
+    } else {
+        if (alpha != 0x3f800000u || alpha_recip != 0x3f800000u) {
+            celu_tile_init();
+            celu_tile<is_fp32_dest_acc_en>(idst, alpha, alpha_recip);
+            return;
+        }
+        if (idst != 0) {
+            celu_tile_init();
+            celu_tile<is_fp32_dest_acc_en>(idst, alpha, alpha_recip);
+            return;
+        }
+        MATH(SFPU_UNARY_CALL(
+            DST_SYNC_MODE,
+            is_fp32_dest_acc_en,
+            calculate_celu_tt_poly_bf16,
+            (32 /* ITERATIONS */),
+            idst,
+            VectorMode::None));
+    }
+#endif
+}
+
+/** Initialize the internal BF16 typed-compiler route. */
+ALWI void celu_tt_poly_bf16_tile_init() { celu_tile_init(); }
+
 }  // namespace ckernel

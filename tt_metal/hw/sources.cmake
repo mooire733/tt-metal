@@ -427,4 +427,12 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_hardshrink_bf16_wormhole_b0.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_simple_algebraic.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_simple_forward.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_celu_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_celu_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_cascade_dense.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_dense_polynomial.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_elu_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_elu_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_selu_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_selu_bf16_wormhole_b0.h
 )

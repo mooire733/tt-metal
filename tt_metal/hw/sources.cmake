@@ -394,4 +394,11 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_target_special_policy.inc
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_tti_replay.h
     inc/api/compute/eltwise_unary/erf_bw_tt_poly_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_exp2_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_exp2_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_exp2.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_exp2_paired.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_expm1_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_factored_cw_expm1.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_factored_cw_expm1_core.h
 )

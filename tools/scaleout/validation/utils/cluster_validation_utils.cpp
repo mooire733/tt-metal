@@ -1726,36 +1726,75 @@ tt::tt_metal::AsicTopology generate_asic_topology_from_connections(
     tt::tt_metal::AsicTopology asic_topology;
     std::unordered_map<tt_metal::AsicID, std::set<tt_metal::AsicID>> visited;
     std::unordered_map<tt_metal::AsicID, std::unordered_map<tt_metal::AsicID, uint32_t>> visited_idx;
+    // Build a non-throwing lookup (host -> tray -> asic-location -> AsicID) over the ASICs that were
+    // actually discovered in this run. When the golden descriptor covers a larger system than the hosts
+    // under recovery (e.g. running two hosts against the exabox-wide golden), the vast majority of golden
+    // connections reference ASICs we never discovered. The throwing get_asic_id() logs a
+    // `critical | Always` breadcrumb at every miss (independent of any catch), which floods the log with
+    // tens of thousands of lines. Resolving endpoints against this map instead means we never call the
+    // throwing path, so no breadcrumb is ever emitted here.
+    std::unordered_map<std::string, std::unordered_map<uint32_t, std::unordered_map<uint32_t, tt_metal::AsicID>>>
+        discovered_asic_ids;
+    for (const auto& [asic_id, desc] : physical_system_descriptor.get_asic_descriptors()) {
+        discovered_asic_ids[desc.host_name][*desc.tray_id][*desc.asic_location] = asic_id;
+    }
+    auto resolve_asic_id =
+        [&](const std::string& host, uint32_t tray, uint32_t loc) -> std::optional<tt_metal::AsicID> {
+        auto h = discovered_asic_ids.find(host);
+        if (h == discovered_asic_ids.end()) {
+            return std::nullopt;
+        }
+        auto t = h->second.find(tray);
+        if (t == h->second.end()) {
+            return std::nullopt;
+        }
+        auto a = t->second.find(loc);
+        if (a == t->second.end()) {
+            return std::nullopt;
+        }
+        return a->second;
+    };
     for (const auto& connection : physical_connections) {
         auto src = connection.first;
         auto dst = connection.second;
-        tt_metal::AsicID src_asic_id;
-        tt_metal::AsicID dst_asic_id;
-        try {
-            src_asic_id = physical_system_descriptor.get_asic_id(
-                src.hostname,
-                tt::tt_metal::TrayID(*src.tray_id),
-                tt_metal::ASICLocation(src.asic_channel.asic_location));
-            dst_asic_id = physical_system_descriptor.get_asic_id(
-                dst.hostname,
-                tt::tt_metal::TrayID(*dst.tray_id),
-                tt_metal::ASICLocation(dst.asic_channel.asic_location));
-        } catch (const std::exception& e) {
-            // An endpoint references an ASIC that was not discovered (e.g. a fully-missing board).
-            // Skip this connection rather than aborting so that port-down/reset can proceed for the
-            // remaining links.
-            log_warning(
-                tt::LogDistributed,
-                "Skipping connection with undiscovered ASIC ({} tray {} asic {} <-> {} tray {} asic {}): {}",
-                src.hostname,
-                *src.tray_id,
-                src.asic_channel.asic_location,
-                dst.hostname,
-                *dst.tray_id,
-                dst.asic_channel.asic_location,
-                e.what());
+
+        const auto src_asic_id_opt = resolve_asic_id(src.hostname, *src.tray_id, src.asic_channel.asic_location);
+        const auto dst_asic_id_opt = resolve_asic_id(dst.hostname, *dst.tray_id, dst.asic_channel.asic_location);
+        if (!src_asic_id_opt.has_value() || !dst_asic_id_opt.has_value()) {
+            // At least one endpoint ASIC was not discovered. Only warn when both endpoint hosts were
+            // discovered: that means a specific board/ASIC on a host we are actively recovering is
+            // missing (e.g. a dead board), which is a genuine problem worth flagging and is rare.
+            // Everything else -- connections to hosts outside the recovery set, or fully external links
+            // in the golden -- is demoted to debug so the default log stays quiet. When the full system
+            // is under recovery every ASIC is discovered and nothing is skipped here.
+            const bool both_hosts_discovered =
+                discovered_asic_ids.contains(src.hostname) && discovered_asic_ids.contains(dst.hostname);
+            if (both_hosts_discovered) {
+                log_warning(
+                    tt::LogDistributed,
+                    "Skipping connection with undiscovered ASIC ({} tray {} asic {} <-> {} tray {} asic {})",
+                    src.hostname,
+                    *src.tray_id,
+                    src.asic_channel.asic_location,
+                    dst.hostname,
+                    *dst.tray_id,
+                    dst.asic_channel.asic_location);
+            } else {
+                log_debug(
+                    tt::LogDistributed,
+                    "Skipping golden connection outside discovered host set ({} tray {} asic {} <-> {} tray {} asic "
+                    "{})",
+                    src.hostname,
+                    *src.tray_id,
+                    src.asic_channel.asic_location,
+                    dst.hostname,
+                    *dst.tray_id,
+                    dst.asic_channel.asic_location);
+            }
             continue;
         }
+        const tt_metal::AsicID src_asic_id = *src_asic_id_opt;
+        const tt_metal::AsicID dst_asic_id = *dst_asic_id_opt;
         if (!visited[src_asic_id].contains(dst_asic_id)) {
             asic_topology[src_asic_id].push_back(
                 {dst_asic_id,

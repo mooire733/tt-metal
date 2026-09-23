@@ -71,6 +71,7 @@
 #include <tt-metalium/hal_types.hpp>
 
 #include "impl/context/metal_context.hpp"
+#include "impl/context/metal_env_accessor.hpp"
 #include "hostdevcommon/fabric_common.h"  // routing_l1_info_t — identity field layout
 #include "llrt/metal_soc_descriptor.hpp"
 #include "umd/device/chip/sw_emule_chip.hpp"
@@ -1512,12 +1513,12 @@ static std::map<std::string, std::string> build_kernel_defines(
         }
     }
 
-    auto arch = MetalContext::instance().get_cluster().arch();
+    auto& metal_context = MetalContext::instance(impl.get_context_id());
+    auto arch = metal_context.get_cluster().arch();
     if (arch == ARCH::QUASAR) {
         defines["ARCH_QUASAR"] = "1";
-        // Build the 4-row FPU variant when TT_METAL_QUASAR_FOUR_ROW is set; default is 8-row.
-        const char* four_row = std::getenv("TT_METAL_QUASAR_FOUR_ROW");
-        if (four_row != nullptr && (std::string(four_row) == "1" || std::string(four_row) == "true")) {
+        const auto& rtoptions = MetalEnvAccessor(metal_context.get_env()).impl().get_rtoptions();
+        if (rtoptions.get_quasar_four_row()) {
             defines["MATH_ROWS"] = "4";
         }
     } else if (arch == ARCH::WORMHOLE_B0) {

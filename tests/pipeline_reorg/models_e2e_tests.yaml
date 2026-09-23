@@ -2158,9 +2158,13 @@
     curl -sSfL --retry 3 -o /tmp/cosyvoice_ci_assets.tar.gz https://github.com/mtairum/cosyvoice-300m-ttnn-ci-assets/releases/download/v1/cosyvoice_ci_assets_v1.tar.gz
     tar -xzf /tmp/cosyvoice_ci_assets.tar.gz -C models/demos/cosyvoice/tests/golden/
     export COSYVOICE_INPUTS=models/demos/cosyvoice/tests/golden/inputs
-    pytest models/demos/cosyvoice/tests/e2e/ -v --timeout 1800
+    # Run both suites even if the first fails: the perf gates are the point of this job and
+    # must report regardless of an e2e failure. Exit code is the OR of the two.
+    exit_code=0
+    pytest models/demos/cosyvoice/tests/e2e/ -v --timeout 1800 || exit_code=$?
     unset TT_METAL_WATCHER
-    pytest models/demos/cosyvoice/tests/perf/ -v -s --timeout 1800
+    pytest models/demos/cosyvoice/tests/perf/ -v -s --timeout 1800 || exit_code=$?
+    exit $exit_code
   model: cosyvoice-300m
   model_family: CosyVoice
   skus:

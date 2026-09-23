@@ -2163,7 +2163,11 @@
     exit_code=0
     pytest models/demos/cosyvoice/tests/e2e/ -v --timeout 1800 || exit_code=$?
     unset TT_METAL_WATCHER
-    pytest models/demos/cosyvoice/tests/perf/ -v -s --timeout 1800 || exit_code=$?
+    # test_streaming_perf.py is left out on purpose: on bh_p150 CI VMs the job died twice at the same
+    # point ("runner lost communication with the server", tt-metal-ci-vm-302 and -305, ~12 min into the
+    # perf suite), and that test is the one PERF.md documents as wedging a board at 100 % host CPU.
+    pytest models/demos/cosyvoice/tests/perf/ -v -s --timeout 1800 \
+      --ignore=models/demos/cosyvoice/tests/perf/test_streaming_perf.py || exit_code=$?
     exit $exit_code
   model: cosyvoice-300m
   model_family: CosyVoice

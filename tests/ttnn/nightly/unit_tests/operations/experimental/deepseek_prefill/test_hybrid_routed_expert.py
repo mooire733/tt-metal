@@ -31,9 +31,6 @@ CI runs the row-major cases, which is the layout production feeds the op; the ti
 variants are pruned per test with ci_pruning.tiled_x_input, exactly as the reference file does.
 """
 
-import math
-import random
-
 import pytest
 import torch
 from loguru import logger
@@ -360,40 +357,38 @@ def _tile_aligned_region_offsets(counts: list[int]) -> list[int]:
     return offsets
 
 
-def _random_expert_counts(
-    seed: int, experts_per_chip: int, max_per_expert: int, threshold: int, buffer_rows: int
-) -> list[int]:
-    """Random active-token count per local expert, the way a chip sees them in the model: anything
-    from empty to the per-expert maximum, not tile-aligned, and fitting the dispatch buffer once
-    tile-rounded. Seeded, so a failing draw reproduces.
+# Hardcoded active-token counts per local expert, one (fused, unified) pair of lists per model. The
+# fused list holds counts at or below the model's hybrid threshold, the unified list counts above
+# it, both the same length, and _alternating_counts interleaves them fused, unified, fused, ... so
+# each half of the union op runs exactly half the chip's experts and every region of one half sits
+# between two regions of the other. Alternating, rather than grouping, is what makes a swapped
+# offset or a stale per-expert weight address in either half land in the other half's rows, where
+# it is graded. Counts are not tile-aligned, span a few tokens to the per-expert maximum, and sit on
+# the threshold from both sides (320/321, 128/129) so the dispatch boundary itself is exercised.
+_MODEL_MULTI_EXPERT_HALVES = {
+    # 8 experts, threshold 320
+    "glm_5_2": ([45, 320, 7, 160], [521, 1027, 2037, 321]),
+    # 12 experts, threshold 320
+    "kimi_k2_7": ([45, 320, 7, 160, 289, 96], [521, 1027, 2037, 321, 4111, 805]),
+    # 28 experts, threshold 128
+    "kimi_k3": (
+        [45, 127, 7, 96, 61, 12, 33, 77, 104, 1, 88, 20, 128, 50],
+        [129, 521, 1027, 2037, 350, 805, 4111, 258, 1490, 3299, 137, 2600, 5120, 700],
+    ),
+}
 
-    Log-uniform, not uniform. Expert load is heavy-tailed -- most experts see a few hundred tokens
-    and a few see thousands -- and the hybrid threshold sits at a few percent of the per-expert
-    maximum, so a uniform draw would hand the fused half one expert in twenty. Equal weight per
-    octave spans the whole range while landing roughly two thirds of the experts at or below the
-    threshold, which is the split the union was built for.
 
-    Two nudges keep every draw a useful case. One expert is forced empty -- a zero-row region is
-    the one shape the fixed-count case never has, and combine and the op both have to step over it.
-    And if a draw happens to hand the unified half no expert at all, the largest count is redrawn
-    above the threshold; the forced-empty expert already guarantees the fused half one.
-    """
-    rng = random.Random(seed)
-    log_span = math.log(max_per_expert + 1)
-    counts = [int(math.exp(rng.uniform(0.0, log_span))) - 1 for _ in range(experts_per_chip)]
-    counts[rng.randrange(experts_per_chip)] = 0
-    # Fit the tile-rounded sum into the buffer, leaving a tile per expert for the rounding itself.
-    # Scale rather than clip, so the shape of the draw survives.
-    fit = buffer_rows - ttnn.TILE_SIZE * experts_per_chip
-    aligned = sum(-(-c // ttnn.TILE_SIZE) * ttnn.TILE_SIZE for c in counts)
-    if aligned > fit:
-        counts = [c * fit // aligned for c in counts]
-    if not any(c > threshold for c in counts):
-        counts[counts.index(max(counts))] = rng.randint(threshold + 1, max_per_expert)
-    assert all(0 <= c <= max_per_expert for c in counts)
-    offsets = _tile_aligned_region_offsets(counts)
-    assert offsets[-1] + counts[-1] <= buffer_rows
-    return counts
+def _alternating_counts(model_name: str, experts_per_chip: int, threshold: int) -> list[int]:
+    """The per-expert counts for one model: its two halves interleaved fused, unified, fused, ...
+
+    Checked here rather than trusted, so a hand edit to one list cannot quietly hand one half most
+    of the experts or slide a count across the threshold."""
+    fused, unified = _MODEL_MULTI_EXPERT_HALVES[model_name]
+    assert len(fused) == len(unified), f"{model_name}: {len(fused)} fused vs {len(unified)} unified counts"
+    assert 2 * len(fused) == experts_per_chip, f"{model_name}: {2 * len(fused)} counts for {experts_per_chip} experts"
+    assert all(c <= threshold for c in fused), f"{model_name}: every fused count must be <= {threshold}: {fused}"
+    assert all(c > threshold for c in unified), f"{model_name}: every unified count must be > {threshold}: {unified}"
+    return [c for pair in zip(fused, unified) for c in pair]
 
 
 def _run_multi_expert(
@@ -512,7 +507,7 @@ def test_hybrid_routed_expert_multi_expert(device, x_row_major: bool):
     Every single-expert case leaves one thing unchecked: that each half writes the right rows for
     the right expert. A swapped region offset, a stale per-expert weight address or cross-expert
     CB state would all still pass them. This is the small, fixed-shape version of that check; the
-    model-shaped random version is test_hybrid_routed_expert_model_multi_expert.
+    model-shaped version is test_hybrid_routed_expert_model_multi_expert.
     """
     _run_multi_expert(
         device,
@@ -572,13 +567,13 @@ _MODEL_MULTI_EXPERT_CASES = [
 def test_hybrid_routed_expert_model_multi_expert(
     device, model_name: str, config, emb_dim: int, hidden_dim: int, activation, threshold: int, x_row_major: bool
 ):
-    """A chip's full complement of experts at each model's real shape, with random counts.
+    """A chip's full complement of experts at each model's real shape, at hardcoded counts.
 
-    Each pass draws a fresh random count per expert -- empty to the per-expert maximum, not
-    tile-aligned, one expert always empty -- so the regions land at offsets the fixed-count case
-    never produces, the buffer holds tens of thousands of rows the way the model's does, and both
-    halves own several experts inside one dispatch. Counts are logged per pass; a failure names the
-    seed that reproduces it.
+    The counts are _MODEL_MULTI_EXPERT_HALVES[model_name] interleaved: half the chip's experts at or
+    below the model's hybrid threshold and half above it, alternating expert by expert, so both routed-expert
+    ops run the same number of experts in one dispatch and every region of one half sits between
+    two regions of the other. Both passes use the same counts on fresh weights and a fresh buffer,
+    which is what grades the per-expert weight re-patch on a program-cache hit.
 
     Kimi K3 does not ship the hybrid split. Its config keeps the measured fused-versus-unified
     crossover, 128 tokens on the 3584x3072 shape, under ROUTED_EXPERT_HYBRID_TOKEN_THRESHOLD_MEASURED;
@@ -588,11 +583,8 @@ def test_hybrid_routed_expert_model_multi_expert(
     LatentMoE width -- not whether the model dispatches it.
     """
     experts_per_chip = config.NUM_ROUTED_EXPERTS // _GALAXY_CHIPS
-    buffer_rows = _dispatch_buffer_rows(_ISL_ALLOCATED_TOKENS, experts_per_chip)
-    passes = [
-        (seed, _random_expert_counts(seed, experts_per_chip, _ISL_ALLOCATED_TOKENS, threshold, buffer_rows))
-        for seed in (42, 7)
-    ]
+    counts = _alternating_counts(model_name, experts_per_chip, threshold)
+    passes = [(seed, counts) for seed in (42, 7)]
     _run_multi_expert(
         device,
         emb_dim=emb_dim,

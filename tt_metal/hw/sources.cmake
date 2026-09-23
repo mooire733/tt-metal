@@ -375,4 +375,23 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_finite_reciprocal.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_min_max.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_mirrored_terminals.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_erf_bw_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_erf_bw_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_asymptotic_exp.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_asymptotic_factor.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_config_tile.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_domain_action_coordinate.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_domain_finalize.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_domain_prepare.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_domain_symmetric_constant.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_encoded_domain_finalize.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_gradient_finalization_owner.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_gradient_finalize.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_polynomial_dual_tile.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_raw_class_policy.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_selected_core_total.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_selected_reciprocal_init.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_target_special_policy.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_tti_replay.h
+    inc/api/compute/eltwise_unary/erf_bw_tt_poly_bf16.h
 )

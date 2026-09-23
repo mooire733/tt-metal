@@ -26,3 +26,9 @@ leaky_relu_tile
 
 .. doxygenfunction:: leaky_relu_tile_init()
 .. doxygenfunction:: leaky_relu_tile(uint32_t idst, uint32_t lower_limit)
+
+Compiler-generated BF16 integration
+-----------------------------------
+
+.. doxygenfunction:: relu_tt_poly_bf16_tile_init
+.. doxygenfunction:: relu_tt_poly_bf16_tile

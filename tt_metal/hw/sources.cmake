@@ -435,4 +435,13 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_elu_bf16_wormhole_b0.h
     ckernels/common/llk_sfpu/ckernel_sfpu_selu_bf16_blackhole.h
     ckernels/common/llk_sfpu/ckernel_sfpu_selu_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_celu_bw_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_celu_bw_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_polynomial_dst_tile.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_selected_exp_pool_init.inc
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_zone_gradient_finalize.inc
+    inc/api/compute/eltwise_unary/celu_bw_tt_poly_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_elu_bw_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_elu_bw_bf16_wormhole_b0.h
+    inc/api/compute/eltwise_unary/elu_bw_tt_poly_bf16.h
 )

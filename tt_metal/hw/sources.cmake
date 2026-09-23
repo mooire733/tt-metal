@@ -444,4 +444,10 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_elu_bw_bf16_blackhole.h
     ckernels/common/llk_sfpu/ckernel_sfpu_elu_bw_bf16_wormhole_b0.h
     inc/api/compute/eltwise_unary/elu_bw_tt_poly_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardsigmoid_bw_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardsigmoid_bw_bf16_wormhole_b0.h
+    inc/api/compute/eltwise_unary/hardsigmoid_bw_tt_poly_bf16.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardswish_bw_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardswish_bw_bf16_wormhole_b0.h
+    inc/api/compute/eltwise_unary/hardswish_bw_tt_poly_bf16.h
 )

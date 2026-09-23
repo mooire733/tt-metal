@@ -46,22 +46,14 @@ def test_run_average_pool2d(
 @pytest.mark.parametrize(
     "act_shape",
     (
-        pytest.param(
-            [1, 7, 7, 2048],
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=RuntimeError,
-                reason="padded RM: NC folds to one slice but 49 logical rows sit in 224 padded ones, "
-                "which reduce refuses - see test_global_avg_pool2d_legacy_pad_to_tile_rejected",
-            ),
-        ),
+        [1, 7, 7, 2048],
         [1, 1, 32, 64],
         [1, 1, 16, 128],
     ),
     ids=["resnet50_unpadded", "rm_dense_alligned", "rm_dense_unaligned"],
 )
 def test_global_avg_pool2d_legacy_pad_to_tile(act_shape, device):
-    """Legacy pad_to_tile ROW_MAJOR inputs. Dense RM mean/sum allows suffix H padding when NC=1."""
+    """Legacy pad_to_tile ROW_MAJOR inputs, including shapes whose W pad is interleaved across H."""
     torch.manual_seed(0)
     act = torch.randn(act_shape, dtype=torch.bfloat16).float()
     ttact = ttnn.Tensor(act, ttnn.bfloat16)
@@ -76,17 +68,28 @@ def test_global_avg_pool2d_legacy_pad_to_tile(act_shape, device):
     assert_with_pcc(golden, out)
 
 
-@pytest.mark.parametrize("act_shape", ([[1, 7, 7, 2048]]), ids=["resnet50_unpadded"])
-def test_global_avg_pool2d_legacy_pad_to_tile_rejected(act_shape, device, expect_error):
-    """pad_to_tile pads H per NC slice, so the pool's canonical (N, 1, H*W, C) view carries 224
-    padded rows over 49 logical ones. The dense RM reader steps by the logical row count and so does
-    the tilize a fallback would run, so reduce refuses instead of silently converting the layout."""
-    torch.manual_seed(0)
-    act = torch.randn(act_shape, dtype=torch.bfloat16).float()
+@pytest.mark.parametrize(
+    "act_shape",
+    (
+        [1, 2, 17, 64],
+        [1, 4, 29, 64],
+        [1, 7, 31, 64],
+        [1, 2, 31, 64],
+        [1, 1, 62, 64],
+        [1, 7, 7, 64],
+        [1, 7, 7, 2048],
+    ),
+    ids=["h2_w17", "h4_w29", "h7_w31", "h2_w31", "suffix_h1_w62", "resnet_hw7", "resnet50"],
+)
+def test_global_avg_pool2d_padded_row_major_ones(act_shape, device):
+    """pad_to_tile pads W on every H row. Folding that into one reduce axis used to sum the pad
+    rows (mean of ones came back as 0.559 for [1, 2, 17, 64]). The single-row case is real suffix
+    padding and must stay 1.0 as well."""
+    act = torch.ones(act_shape, dtype=torch.bfloat16)
     ttact = ttnn.Tensor(act, ttnn.bfloat16).pad_to_tile(0.0).to(device)
 
-    with expect_error(RuntimeError, "ROW_MAJOR input padded on H is only supported"):
-        ttnn.global_avg_pool2d(ttact)
+    out = ttnn.to_torch(ttnn.global_avg_pool2d(ttact)).float()
+    torch.testing.assert_close(out, torch.ones_like(out), atol=1e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", [ttnn.bfloat16], ids=["BFLOAT16"])

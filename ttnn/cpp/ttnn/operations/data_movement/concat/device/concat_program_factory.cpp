@@ -25,7 +25,7 @@ tt::tt_metal::ProgramDescriptor ConcatProgramFactory::create_descriptor(
     const auto& sub_core_grids = operation_attributes.sub_core_grids;
 
     ProgramDescriptor desc;
-    IDevice* device = output.device();
+    MeshDevice* device = output.device();
 
     const tt::DataFormat cb_data_format = datatype_to_dataformat_converter(output.dtype());
     const bool rm_layout = output.layout() == Layout::ROW_MAJOR;

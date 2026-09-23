@@ -26,7 +26,7 @@ ProgramDescriptor NLPConcatHeadsDecodeSubcoregridsProgramFactory::create_descrip
     const uint32_t head_dim = input_shape[-1];
     const uint32_t batch = input_shape[1];
 
-    tt_metal::IDevice* device = input_tensor.device();
+    tt_metal::distributed::MeshDevice* device = input_tensor.device();
 
     tt::DataFormat cb_data_format = tt_metal::datatype_to_dataformat_converter(input_tensor.dtype());
 

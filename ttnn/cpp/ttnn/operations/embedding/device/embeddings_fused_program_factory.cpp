@@ -35,7 +35,7 @@ tt::tt_metal::ProgramDescriptor EmbeddingsFusedProgramFactory::create_descriptor
     //                      Grayskull Device Setup
     ////////////////////////////////////////////////////////////////////////////
     // This should allocate a DRAM buffer on the device
-    IDevice* device = a.device();
+    MeshDevice* device = a.device();
 
     ////////////////////////////////////////////////////////////////////////////
     //                      Application Setup

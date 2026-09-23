@@ -92,7 +92,7 @@ WelfordReduceDeviceOperation::WelfordReduceProgramFactory::create_program_artifa
     // sqrt value straddles a bf16 rounding boundary).
     bool narrow_scratch_to_bf16 = !is_std && dst_cb_data_format == tt::DataFormat::Float16_b;
 
-    tt_metal::IDevice* device = &input.mutable_device();
+    tt_metal::distributed::MeshDevice& device = input.mutable_device();
 
     // Work division:
     // - W-reduce: Work is split by rows of the tile grid (NC * Ht work units).
@@ -148,7 +148,7 @@ WelfordReduceDeviceOperation::WelfordReduceProgramFactory::create_program_artifa
     //     (one per (dim0, dim1) pair: 3 × 4 = 12).
 
     const uint32_t reduce_batch_size = operation_attributes.reduce_batch_size;
-    auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
+    auto compute_with_storage_grid_size = device.compute_with_storage_grid_size();
     auto num_work_units = reduce_w ? (NC * Ht) : (reduce_hw ? (NC / reduce_batch_size) : (NC * Wt));
     uint32_t num_cores;
     CoreRangeSet all_cores, core_group_1, core_group_2;
@@ -367,7 +367,7 @@ WelfordReduceDeviceOperation::WelfordReduceProgramFactory::create_program_artifa
         .tensor_bindings = {TensorBinding{.tensor_parameter_name = INPUT_TENSOR, .accessor_name = "src"}},
         .compile_time_args = std::move(reader_ct_args),
         .runtime_arg_schema = {.runtime_arg_names = std::move(reader_rta_names)},
-        .hw_config = ttnn::create_reader_datamovement_config(device->arch()),
+        .hw_config = ttnn::create_reader_datamovement_config(device.arch()),
     });
 
     // --- Writer kernel ---
@@ -443,7 +443,7 @@ WelfordReduceDeviceOperation::WelfordReduceProgramFactory::create_program_artifa
         .tensor_bindings = {TensorBinding{.tensor_parameter_name = OUTPUT_TENSOR, .accessor_name = "dst"}},
         .compile_time_args = std::move(writer_ct_args),
         .runtime_arg_schema = {.runtime_arg_names = std::move(writer_rta_names)},
-        .hw_config = ttnn::create_writer_datamovement_config(device->arch()),
+        .hw_config = ttnn::create_writer_datamovement_config(device.arch()),
     });
 
     // --- Compute kernels ---
@@ -501,7 +501,7 @@ WelfordReduceDeviceOperation::WelfordReduceProgramFactory::create_program_artifa
     // into sfpu_precision_mode and the caller's dst_full_sync_en into double_buffer_dest, silently
     // changing precision / Dest buffering. (DST_SYNC_FULL is still passed as a *define*, exactly as
     // legacy did.)
-    auto compute_hw = ttnn::to_compute_hardware_config(device->arch(), operation_attributes.compute_kernel_config);
+    auto compute_hw = ttnn::to_compute_hardware_config(device.arch(), operation_attributes.compute_kernel_config);
     // std::visit rather than a Gen1-only get_if: to_compute_hardware_config yields a
     // ComputeGen2Config on Quasar, and the fields set below exist on both generations. The
     // explicit-unpack-mode requirement in particular is enforced generation-agnostically, so a

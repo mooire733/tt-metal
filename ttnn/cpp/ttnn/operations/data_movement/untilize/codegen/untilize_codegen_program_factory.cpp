@@ -106,7 +106,7 @@ KernelDescriptor make_compute(
 }
 
 struct CommonArgs {
-    IDevice* device;
+    MeshDevice* device;
     Buffer* in_buf;
     Buffer* out_buf;
     tt::DataFormat in_fmt;

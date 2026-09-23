@@ -28,7 +28,7 @@ RandnDeviceOperation::ProgramFactory::cached_program_t RandnDeviceOperation::Pro
     const operation_attributes_t& operation_attributes,
     [[maybe_unused]] const tensor_args_t& tensor_args,
     tensor_return_value_t& output) {
-    IDevice* device = output.device();
+    MeshDevice* device = output.device();
     auto grid = device->compute_with_storage_grid_size();
 
     uint32_t units_to_divide = output.physical_volume() / constants::TILE_HW;

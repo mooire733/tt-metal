@@ -108,7 +108,7 @@ void ttnn_device(nb::module_& mod) {
 
     mod.def(
         "deallocate_buffers",
-        [](ttnn::MeshDevice* device) { ttnn::deallocate_buffers(device); },
+        [](ttnn::MeshDevice& device) { ttnn::deallocate_buffers(device); },
         nb::arg("device"),
         R"doc(
         Deallocate all buffers associated with Device handle
@@ -566,14 +566,6 @@ void device_module(nb::module_& m_device) {
                     std::to_string(static_cast<int>(buffer_type)));
         }
     };
-    m_device.def(
-        "GetAllocatorBaseAddress",
-        [buffer_type_to_hal_mem_type](IDevice* device, const BufferType& buffer_type) {
-            return device->allocator()->get_base_allocator_addr(buffer_type_to_hal_mem_type(buffer_type));
-        },
-        nb::arg("device").noconvert(),
-        nb::arg("buffer_type").noconvert(),
-        get_allocator_base_address_doc.data());
     m_device.def(
         "GetAllocatorBaseAddress",
         [buffer_type_to_hal_mem_type](MeshDevice* device, const BufferType& buffer_type) {

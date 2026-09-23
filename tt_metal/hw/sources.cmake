@@ -418,4 +418,9 @@ set(HW_JIT_API_HEADERS
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_rational_parity_core.h
     ckernels/common/llk_sfpu/ckernel_sfpu_relu_bf16.h
     ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_clamped_affine.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardsigmoid_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_hardsigmoid_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_sigmoid_bf16_blackhole.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_sigmoid_bf16_wormhole_b0.h
+    ckernels/common/llk_sfpu/ckernel_sfpu_tt_poly_exp2_reciprocal.h
 )

@@ -179,4 +179,74 @@ ALWI void hardshrink_tile(uint32_t idst, uint32_t param0) {
 ALWI void hardshrink_tile_init() { MATH(SFPU_UNARY_INIT(hardshrink)); }
 #endif  // !ARCH_QUASAR
 
+/** Internal BF16 typed-compiler route; public callers retain the stock entry point. */
+ALWI void hardsigmoid_tt_poly_bf16_tile(uint32_t idst) {
+#if defined(TT_POLY_LLK_DISABLE) ||                                                                                   \
+    !((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && defined(TT_METAL_SFPU_SINGLE_TILE_DST) &&                \
+      TT_METAL_SFPU_SINGLE_TILE_DST == 1 && defined(TT_POLY_BF16_UNARY_CONTEXT) && TT_POLY_BF16_UNARY_CONTEXT == 1 && \
+      defined(SFPU_OP_PROGRAM_INIT_0))
+    hardsigmoid_tile(idst);
+#else
+    if constexpr (DST_ACCUM_MODE) {
+        hardsigmoid_tile(idst);
+    } else {
+        if (idst != 0) {
+            hardsigmoid_tile_init();
+            hardsigmoid_tile(idst);
+            if constexpr (DST_ACCUM_MODE) {
+                hardsigmoid_tile_init();
+            } else {
+                hardsigmoid_tile_init();
+#if !defined(TT_POLY_LLK_DISABLE) && ((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && \
+                                      defined(TT_METAL_SFPU_SINGLE_TILE_DST) && TT_METAL_SFPU_SINGLE_TILE_DST == 1)
+                MATH(sfpu::init_hardsigmoid_tt_poly_bf16());
+#endif
+            }
+            return;
+        }
+        MATH(SFPU_UNARY_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            calculate_hardsigmoid_tt_poly_bf16,
+            (32 /* ITERATIONS */),
+            idst,
+            VectorMode::None));
+    }
+#endif
+}
+
+/** Initialize the internal BF16 typed-compiler route. */
+ALWI void hardsigmoid_tt_poly_bf16_tile_init() {
+#if defined(TT_POLY_LLK_DISABLE) ||                                                                                   \
+    !((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && defined(TT_METAL_SFPU_SINGLE_TILE_DST) &&                \
+      TT_METAL_SFPU_SINGLE_TILE_DST == 1 && defined(TT_POLY_BF16_UNARY_CONTEXT) && TT_POLY_BF16_UNARY_CONTEXT == 1 && \
+      defined(SFPU_OP_PROGRAM_INIT_0))
+    hardsigmoid_tile_init();
+#else
+    if constexpr (DST_ACCUM_MODE) {
+        hardsigmoid_tile_init();
+    }
+#endif
+}
+
+/** Initialize the selected single-tile program once, before its tile loop. */
+ALWI void hardsigmoid_tt_poly_bf16_program_init() {
+#if !defined(TT_POLY_LLK_DISABLE) &&                                                                                 \
+    ((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && defined(TT_METAL_SFPU_SINGLE_TILE_DST) &&                \
+     TT_METAL_SFPU_SINGLE_TILE_DST == 1 && defined(TT_POLY_BF16_UNARY_CONTEXT) && TT_POLY_BF16_UNARY_CONTEXT == 1 && \
+     defined(SFPU_OP_PROGRAM_INIT_0))
+    if constexpr (!(DST_ACCUM_MODE)) {
+        if constexpr (DST_ACCUM_MODE) {
+            hardsigmoid_tile_init();
+        } else {
+            hardsigmoid_tile_init();
+#if !defined(TT_POLY_LLK_DISABLE) && ((defined(ARCH_BLACKHOLE) || defined(ARCH_WORMHOLE)) && \
+                                      defined(TT_METAL_SFPU_SINGLE_TILE_DST) && TT_METAL_SFPU_SINGLE_TILE_DST == 1)
+            MATH(sfpu::init_hardsigmoid_tt_poly_bf16());
+#endif
+        }
+    }
+#endif
+}
+
 }  // namespace ckernel

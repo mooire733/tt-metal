@@ -824,7 +824,13 @@ std::pair<std::string, std::string> get_op_init_and_func_default(
         case UnaryOpType::I0: return {"i0_tile_init();", fmt::format("i0_tile({});", idst)};
         case UnaryOpType::I1: return {"i1_tile_init();", fmt::format("i1_tile({});", idst)};
         case UnaryOpType::EXP: return {"exp_tile_init();", fmt::format("exp_tile({});", idst)};
-        case UnaryOpType::SIGMOID: return {"sigmoid_tile_init();", fmt::format("sigmoid_tile({});", idst)};
+        case UnaryOpType::SIGMOID:
+#if !defined(TT_POLY_LLK_DISABLE)
+            if (input_dtype == DataType::BFLOAT16) {
+                return {"sigmoid_tt_poly_bf16_tile_init();", fmt::format("sigmoid_tt_poly_bf16_tile({});", idst)};
+            }
+#endif
+            return {"sigmoid_tile_init();", fmt::format("sigmoid_tile({});", idst)};
         case UnaryOpType::ERF:
 #if !defined(TT_POLY_LLK_DISABLE)
             if (input_dtype == DataType::BFLOAT16) {
